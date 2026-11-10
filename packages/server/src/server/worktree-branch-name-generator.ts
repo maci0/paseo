@@ -5,6 +5,7 @@ import {
   StructuredAgentFallbackError,
   StructuredAgentResponseError,
   generateStructuredAgentResponseWithFallback,
+  type StructuredAgentGenerationWithFallbackOptions,
 } from "./agent/agent-response-loop.js";
 import {
   resolveStructuredGenerationProviders,
@@ -110,24 +111,27 @@ export async function generateBranchNameFromFirstAgentContext(
           currentSelection: options.currentSelection,
         })
       : [];
-    const result = await generator({
-      manager: options.agentManager,
-      cwd: options.cwd,
-      prompt: await buildPrompt(seed, {
+    // A typed request: scriptc cannot widen an inline literal across the generic call.
+    const request: StructuredAgentGenerationWithFallbackOptions<z.infer<typeof BranchNameSchema>> =
+      {
+        manager: options.agentManager,
         cwd: options.cwd,
-        workspaceGitService: options.workspaceGitService,
-      }),
-      schema: BranchNameSchema,
-      schemaName: "BranchName",
-      maxRetries: 2,
-      providers,
-      persistSession: false,
-      logger: options.logger,
-      agentConfigOverrides: {
-        title: "Branch name generator",
-        internal: true,
-      },
-    });
+        prompt: await buildPrompt(seed, {
+          cwd: options.cwd,
+          workspaceGitService: options.workspaceGitService,
+        }),
+        schema: BranchNameSchema,
+        schemaName: "BranchName",
+        maxRetries: 2,
+        providers,
+        persistSession: false,
+        logger: options.logger,
+        agentConfigOverrides: {
+          title: "Branch name generator",
+          internal: true,
+        },
+      };
+    const result = await generator(request);
     return {
       title: result.title.trim() || null,
       branch: result.branch.trim() || null,

@@ -900,6 +900,12 @@ interface CodexMcpServerConfig {
   tool_timeout_sec?: number;
 }
 
+// scriptc maps a spread of the event union back into the union only through a declared return type.
+function withStreamEventTurnId(event: AgentStreamEvent, turnId: string): AgentStreamEvent {
+  const tagged = { ...event, turnId };
+  return tagged;
+}
+
 function toCodexMcpConfig(config: McpServerConfig): CodexMcpServerConfig {
   switch (config.type) {
     case "stdio":
@@ -919,8 +925,9 @@ function toCodexMcpConfig(config: McpServerConfig): CodexMcpServerConfig {
         http_headers: config.headers,
       };
     default: {
-      const _exhaustive = config as { type: never };
-      throw new Error(`Unsupported MCP config type: ${String(_exhaustive.type)}`);
+      // scriptc cannot convert the config union to { type: never }; read it as a record.
+      const unknownConfig: Record<string, unknown> = config;
+      throw new Error(`Unsupported MCP config type: ${String(unknownConfig.type)}`);
     }
   }
 }
@@ -1521,9 +1528,7 @@ function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
         return {
           path: pathValue,
           kind:
-            (typeof record.kind === "string" && record.kind) ||
-            (typeof record.type === "string" && record.type) ||
-            undefined,
+            nonEmptyString(record.kind) ?? nonEmptyString(record.type),
           content: extractPatchLikeText(record),
         };
       })
@@ -1540,9 +1545,7 @@ function parseCodexPatchChanges(changes: unknown): CodexPatchFileChange[] {
       {
         path: directPathValue,
         kind:
-          (typeof recordChanges.kind === "string" && recordChanges.kind) ||
-          (typeof recordChanges.type === "string" && recordChanges.type) ||
-          undefined,
+          nonEmptyString(recordChanges.kind) ?? nonEmptyString(recordChanges.type),
         content: extractPatchLikeText(recordChanges),
       },
     ];
@@ -4759,7 +4762,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         mappedAnswers ??
         Object.fromEntries(
           questions
-            .map((question) => {
+            .map((question): [string, { answers: string[] }] | null => {
               const fallback = question.options[0]?.label?.trim();
               return fallback ? [question.id, { answers: [fallback] }] : null;
             })
@@ -5439,7 +5442,7 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   private notifySubscribers(event: AgentStreamEvent): void {
     const turnId = getAgentStreamEventTurnId(event) ?? this.activeForegroundTurnId;
-    const tagged = turnId ? { ...event, turnId } : event;
+    const tagged = turnId ? withStreamEventTurnId(event, turnId) : event;
     if (this.startupEvents) {
       this.startupEvents.push(tagged);
       return;
@@ -5862,9 +5865,13 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     const state = this.subAgentCallsByCallId.get(subAgentCallId);
     if (state) {
-      const targetThreadIds = childThreadId ? [childThreadId] : state.childThreadIds;
-      for (const targetThreadId of targetThreadIds) {
-        this.emitProviderSubagentTimeline(targetThreadId, timelineItem);
+      // scriptc cannot hold a string[] | Set<string>; iterate each source on its own.
+      if (childThreadId) {
+        this.emitProviderSubagentTimeline(childThreadId, timelineItem);
+      } else {
+        for (const targetThreadId of state.childThreadIds) {
+          this.emitProviderSubagentTimeline(targetThreadId, timelineItem);
+        }
       }
     }
     this.emitSubAgentActivityUpdate(

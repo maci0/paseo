@@ -92,7 +92,7 @@ export type CreatePaseoWorktreeWorkflowFn = (
 
 interface HandleWorkspaceSetupStatusRequestDependencies {
   emit: EmitSessionMessage;
-  workspaceSetupSnapshots: Pick<ReadonlyMap<string, WorkspaceSetupSnapshot>, "get">;
+  workspaceSetupSnapshots: { get: (workspaceId: string) => WorkspaceSetupSnapshot | undefined };
   getWorkspace: (workspaceId: string) => Promise<PersistedWorkspaceRecord | null>;
 }
 

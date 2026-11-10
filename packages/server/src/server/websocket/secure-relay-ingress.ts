@@ -7,7 +7,6 @@
  * admission, together with the negotiated security mode. Relay routing lives in
  * `relay-transport.ts`; credentials and authorization live in admission.
  */
-import { EventEmitter } from "node:events";
 import type pino from "pino";
 import {
   openDaemonSecureChannel,
@@ -16,7 +15,11 @@ import {
   type SecurityMode,
   type Transport as RelayTransport,
 } from "@getpaseo/relay/e2ee";
-import { createEncryptedRelaySocket, type EncryptedRelaySocket } from "./encrypted-relay-socket.js";
+import {
+  createEncryptedRelaySocket,
+  RelaySocketEvents,
+  type EncryptedRelaySocket,
+} from "./encrypted-relay-socket.js";
 
 const HANDSHAKE_TIMEOUT_MS = 15_000;
 
@@ -63,7 +66,7 @@ export async function admitSecuredRelaySocket(
   }, HANDSHAKE_TIMEOUT_MS);
   try {
     const relayTransport = createRelayTransportAdapter(socket, logger);
-    const emitter = new EventEmitter();
+    const emitter = new RelaySocketEvents();
     const pendingMessages: Array<string | ArrayBuffer> = [];
     let attached = false;
     const emitMessage = (data: string | ArrayBuffer) => {

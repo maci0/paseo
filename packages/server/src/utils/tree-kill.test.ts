@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { terminateWithTreeKill } from "./tree-kill.js";
+import { terminateWithTreeKill, treeKillTargetForChild } from "./tree-kill.js";
 
 const pollIntervalMs = 50;
 
@@ -181,4 +181,44 @@ describe("terminateWithTreeKill", () => {
       );
     },
   );
+});
+
+describe("treeKillTargetForChild", () => {
+  test.runIf(process.platform !== "win32")(
+    "follows the child's exit through a forced kill",
+    async () => {
+      tempDir = await mkdtemp(join(tmpdir(), "paseo-server-tree-kill-"));
+      const childPidPath = join(tempDir, "descendant.pid");
+
+      ownerProcess = spawnOwnerWithDescendant({
+        childPidPath,
+        detachedDescendant: false,
+      });
+      await waitForFixtureReady(childPidPath);
+      const target = treeKillTargetForChild(ownerProcess);
+      expect(target.pid).toBe(ownerProcess.pid);
+      expect(target.signalCode).toBeNull();
+
+      const result = await terminateWithTreeKill(target, {
+        gracefulTimeoutMs: 100,
+        forceTimeoutMs: 2000,
+      });
+
+      expect(result).toBe("killed");
+      expect(target.exitCode).toBeNull();
+      expect(target.signalCode).toBe("SIGKILL");
+      await expectOwnerAndDescendantStopped("owner or descendant survived terminateWithTreeKill");
+    },
+  );
+
+  test("reports a child that already exited", async () => {
+    const child = spawn(process.execPath, ["-e", "process.exit(3)"], { stdio: "ignore" });
+    await new Promise((resolve) => child.once("exit", resolve));
+
+    const result = await terminateWithTreeKill(treeKillTargetForChild(child), {
+      gracefulTimeoutMs: 100,
+    });
+
+    expect(result).toBe("already-exited");
+  });
 });

@@ -462,14 +462,16 @@ type ManagedAgentWithSession = ManagedAgentBase & {
   session: AgentSession;
 };
 
+// activeForegroundTurnId has one type in every active arm: scriptc cannot assign a field
+// whose type differs between union arms.
 type ManagedAgentInitializing = ManagedAgentWithSession & {
   lifecycle: "initializing";
-  activeForegroundTurnId: null;
+  activeForegroundTurnId: string | null;
 };
 
 type ManagedAgentIdle = ManagedAgentWithSession & {
   lifecycle: "idle";
-  activeForegroundTurnId: null;
+  activeForegroundTurnId: string | null;
 };
 
 type ManagedAgentRunning = ManagedAgentWithSession & {
@@ -479,7 +481,7 @@ type ManagedAgentRunning = ManagedAgentWithSession & {
 
 type ManagedAgentError = ManagedAgentWithSession & {
   lifecycle: "error";
-  activeForegroundTurnId: null;
+  activeForegroundTurnId: string | null;
   lastError: string;
 };
 
@@ -594,7 +596,10 @@ interface SteerEventBarrier {
   events: AgentStreamEvent[];
 }
 
-const BUSY_STATUSES: Set<AgentLifecycleStatus> = new Set(["initializing", "running"]);
+const BUSY_STATUSES: Set<AgentLifecycleStatus> = new Set<AgentLifecycleStatus>([
+  "initializing",
+  "running",
+]);
 const AgentIdSchema = z.guid();
 
 function isAgentBusy(status: AgentLifecycleStatus): boolean {
@@ -821,7 +826,11 @@ export class AgentManager {
     this.beforeSteerUnavailableFallback = options.beforeSteerUnavailableFallback;
     this.agentStreamCoalescer = new AgentStreamCoalescer({
       windowMs: options.agentStreamCoalesceWindowMs ?? AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
-      timers: { setTimeout, clearTimeout },
+      // Wrapped: scriptc cannot pass the global timer functions as values.
+      timers: {
+        setTimeout: (callback, ms) => setTimeout(callback, ms),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
       onFlush: ({ agentId, item, provider, turnId }) => {
         const event = this.recordAndDispatchTimelineItem(agentId, item, provider, turnId);
         this.notifyForegroundTurnWaiters(agentId, event);
@@ -1130,7 +1139,8 @@ export class AgentManager {
           return {
             sessions: sessions
               .filter((session) => matchesImportableSessionQuery(session, options?.query))
-              .map((session) => Object.assign(session, { provider })),
+              // oxlint-disable-next-line oxc/no-map-spread -- Object.assign has no scriptc lowering.
+              .map((session) => ({ ...session, provider })),
             error: null,
           };
         } catch (error) {
@@ -1405,8 +1415,8 @@ export class AgentManager {
       launchEnv: options.env ? { ...options.env } : undefined,
       historyPrimed: true,
     });
-    if (!agent.internal) {
-      this.pluginLifecycle?.emit("agent.create.after", {
+    if (!agent.internal && this.pluginLifecycle) {
+      this.pluginLifecycle.emit("agent.create.after", {
         agent: describeHookAgent({ ...agent, title: agent.config.title }),
       });
     }
@@ -2121,8 +2131,8 @@ export class AgentManager {
   ): Promise<ArchivedStoredAgentRecord> {
     const archivedRecord = buildArchivedAgentRecord(record, options);
     await this.requireRegistry().upsert(archivedRecord);
-    if (!record.archivedAt && !record.internal) {
-      this.pluginLifecycle?.emit("agent.archive.after", {
+    if (!record.archivedAt && !record.internal && this.pluginLifecycle) {
+      this.pluginLifecycle.emit("agent.archive.after", {
         agent: describeHookAgent(archivedRecord),
         archivedAt: archivedRecord.archivedAt,
       });
@@ -2145,44 +2155,44 @@ export class AgentManager {
   private dispatchStoredAgentState(record: StoredAgentRecord): void {
     const updatedAt = new Date(record.updatedAt);
     const attention = extractAttention(record);
-    this.dispatch({
-      type: "agent_state",
-      agent: {
-        id: record.id,
-        provider: record.provider,
-        cwd: record.cwd,
-        workspaceId: record.workspaceId,
-        owner: record.owner,
-        session: null,
-        capabilities: STORED_AGENT_CAPABILITIES,
-        config: buildStoredAgentConfig(record),
-        runtimeInfo: undefined,
-        lifecycle: "closed",
-        createdAt: new Date(record.createdAt),
-        updatedAt,
-        availableModes: [],
-        features: record.features,
-        currentModeId: record.lastModeId ?? null,
-        pendingPermissions: new Map(),
-        bufferedPermissionResolutions: new Map(),
-        inFlightPermissionResponses: new Set(),
-        pendingReplacement: false,
-        activeForegroundTurnId: null,
-        activeTurnId: null,
-        activeTurnStartedAt: null,
-        foregroundTurnWaiters: new Set(),
-        finalizedForegroundTurnIds: new Set(),
-        unsubscribeSession: null,
-        persistence: record.persistence ?? null,
-        historyPrimed: true,
-        lastUserMessageAt: record.lastUserMessageAt ? new Date(record.lastUserMessageAt) : null,
-        lastUsage: undefined,
-        lastError: record.lastError ?? undefined,
-        attention,
-        internal: record.internal,
-        labels: record.labels,
-      },
-    });
+    // A typed local: scriptc cannot infer the empty Map and Set types inside the inline event.
+    const agent: ManagedAgentClosed = {
+      id: record.id,
+      provider: record.provider,
+      cwd: record.cwd,
+      workspaceId: record.workspaceId,
+      owner: record.owner,
+      session: null,
+      capabilities: STORED_AGENT_CAPABILITIES,
+      config: buildStoredAgentConfig(record),
+      runtimeInfo: undefined,
+      lifecycle: "closed",
+      createdAt: new Date(record.createdAt),
+      // Not shorthand: scriptc lowers a shorthand Date property as a number.
+      updatedAt: updatedAt,
+      availableModes: [],
+      features: record.features,
+      currentModeId: record.lastModeId ?? null,
+      pendingPermissions: new Map(),
+      bufferedPermissionResolutions: new Map(),
+      inFlightPermissionResponses: new Set(),
+      pendingReplacement: false,
+      activeForegroundTurnId: null,
+      activeTurnId: null,
+      activeTurnStartedAt: null,
+      foregroundTurnWaiters: new Set(),
+      finalizedForegroundTurnIds: new Set(),
+      unsubscribeSession: null,
+      persistence: record.persistence ?? null,
+      historyPrimed: true,
+      lastUserMessageAt: record.lastUserMessageAt ? new Date(record.lastUserMessageAt) : null,
+      lastUsage: undefined,
+      lastError: record.lastError ?? undefined,
+      attention,
+      internal: record.internal,
+      labels: record.labels,
+    };
+    this.dispatch({ type: "agent_state", agent });
   }
 
   async setAgentMode(agentId: string, modeId: string): Promise<AgentProviderNotice | null> {
@@ -2850,28 +2860,36 @@ export class AgentManager {
         { type: "turn_started", provider: agent.provider, turnId },
         { timestamp: turnStartedAt.toISOString() },
       );
-      const stagedSubmittedPromptEcho = options?.clientMessageId
-        ? pendingRun.stagedEvents.find(
-            (event): event is Extract<AgentStreamEvent, { type: "timeline" }> =>
+      // Tracked by index: scriptc cannot compare union-typed values by identity.
+      const stagedSubmittedPromptEchoIndex = options?.clientMessageId
+        ? pendingRun.stagedEvents.findIndex(
+            (event) =>
               event.type === "timeline" &&
               event.item.type === "user_message" &&
               event.item.clientMessageId === options.clientMessageId,
           )
-        : undefined;
+        : -1;
+      const stagedSubmittedPromptEcho: AgentStreamEvent | undefined =
+        stagedSubmittedPromptEchoIndex >= 0
+          ? pendingRun.stagedEvents[stagedSubmittedPromptEchoIndex]
+          : undefined;
       if (options?.clientMessageId) {
         this.recordSubmittedPrompt(agent, prompt, options.clientMessageId, "accepted", {
           messageId: options.clientMessageId,
           turnId,
           providerMessageId:
-            stagedSubmittedPromptEcho?.item.type === "user_message"
+            stagedSubmittedPromptEcho?.type === "timeline" &&
+            stagedSubmittedPromptEcho.item.type === "user_message"
               ? stagedSubmittedPromptEcho.item.messageId
               : undefined,
         });
       }
-      for (const stagedEvent of pendingRun.stagedEvents.splice(0)) {
+      const stagedEvents = pendingRun.stagedEvents.splice(0);
+      for (let index = 0; index < stagedEvents.length; index += 1) {
+        const stagedEvent = stagedEvents[index]!;
         const isAcceptedTurnStart =
           stagedEvent.type === "turn_started" && getAgentStreamEventTurnId(stagedEvent) === turnId;
-        if (isAcceptedTurnStart || stagedEvent === stagedSubmittedPromptEcho) {
+        if (isAcceptedTurnStart || index === stagedSubmittedPromptEchoIndex) {
           continue;
         }
         this.enqueueSessionEvent(agent.id, stagedEvent);
@@ -3824,7 +3842,7 @@ export class AgentManager {
       const now = new Date();
       const { durableTimelineHasRows } = await this.initializeAgentTimelineForRegister({
         agentId: resolvedAgentId,
-        now,
+        now: now,
         options,
       });
 
@@ -3832,7 +3850,7 @@ export class AgentManager {
         resolvedAgentId,
         session,
         config,
-        now,
+        now: now,
         durableTimelineHasRows,
         options,
       });
@@ -4095,8 +4113,8 @@ export class AgentManager {
 
   private emitClosedAgent(agent: ManagedAgentClosed, options?: { persist?: boolean }): void {
     this.emitState(agent, options);
-    if (!agent.internal) {
-      this.pluginLifecycle?.emit("agent.close.after", {
+    if (!agent.internal && this.pluginLifecycle) {
+      this.pluginLifecycle.emit("agent.close.after", {
         agent: describeHookAgent({ ...agent, title: agent.config.title }),
       });
     }
@@ -4421,30 +4439,37 @@ export class AgentManager {
   private async primeTimelineFromLegacyProviderHistory(
     agent: ActiveManagedAgent,
     broadcast: boolean | (() => boolean),
-    history:
-      | AsyncIterable<AgentStreamEvent>
-      | Iterable<AgentStreamEvent> = agent.session.streamHistory(),
+    // An array or, when omitted, the provider's history stream. Two loops instead of one over
+    // an Iterable | AsyncIterable union: scriptc cannot convert between the two.
+    history?: AgentStreamEvent[],
   ): Promise<void> {
+    // Held in a record: scriptc fails on a generator-or-null union (SC9001 "arm 0 is generator").
+    const providerHistory = history ? null : { events: agent.session.streamHistory() };
     const deferredBroadcast = typeof broadcast === "function";
     const historyEvents: Extract<AgentStreamEvent, { type: "timeline" }>[] = [];
     const historySubagentEvents: Extract<AgentStreamEvent, { type: "provider_subagent" }>[] = [];
+    const collect = (rawEvent: AgentStreamEvent): void => {
+      const event = limitAgentStreamEventContent(rawEvent);
+      if (event.type === "provider_subagent") {
+        historySubagentEvents.push(event);
+        return;
+      }
+      if (event.type !== "timeline") {
+        return;
+      }
+      for (const item of projectAgentMessages(event.item)) {
+        historyEvents.push({ ...event, item });
+      }
+    };
     agent.historyPrimed = false;
     try {
       // Collect the whole replay before touching either store. A stream that fails
       // halfway then leaves the committed timeline as it was, instead of a partial
       // copy the next attempt would append to.
-      for await (const rawEvent of history) {
-        const event = limitAgentStreamEventContent(rawEvent);
-        if (event.type === "provider_subagent") {
-          historySubagentEvents.push(event);
-          continue;
-        }
-        if (event.type !== "timeline") {
-          continue;
-        }
-        for (const item of projectAgentMessages(event.item)) {
-          historyEvents.push({ ...event, item });
-        }
+      if (providerHistory) {
+        for await (const rawEvent of providerHistory.events) collect(rawEvent);
+      } else if (history) {
+        for (const rawEvent of history) collect(rawEvent);
       }
     } catch (error) {
       this.logger.warn({ err: error, agentId: agent.id }, "Failed to hydrate provider history");

@@ -47,6 +47,20 @@ export function prependEnvPath(existing: string | undefined, value: string): str
   return [value, ...parts].join(path.delimiter);
 }
 
+interface NodeModuleApi {
+  createRequire(url: string): { resolve(request: string): string };
+}
+
+// scriptc refuses require.resolve with a computed request, also through a loader held as a value,
+// so node:module comes through a held loader's call, which scriptc resolves when it runs. Native
+// builds find the sherpa libraries through the binary's RUNPATH and never call this.
+function resolveFromHere(load: NodeRequire, request: string): string {
+  const nodeModule = load("node:module") as NodeModuleApi;
+  return nodeModule.createRequire(import.meta.url).resolve(request);
+}
+
+const require = createRequire(import.meta.url);
+
 export function resolveSherpaLoaderEnv(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch,
@@ -57,9 +71,8 @@ export function resolveSherpaLoaderEnv(
   }
 
   const packageName = sherpaPlatformPackageName(platform, arch);
-  const require = createRequire(import.meta.url);
   try {
-    const pkgJson = require.resolve(`${packageName}/package.json`);
+    const pkgJson = resolveFromHere(require, `${packageName}/package.json`);
     return {
       key,
       libDir: path.dirname(pkgJson),

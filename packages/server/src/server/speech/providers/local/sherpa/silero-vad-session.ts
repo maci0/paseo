@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { URL, fileURLToPath } from "node:url";
 
 import { pcm16leToFloat32 } from "../../../audio.js";
 import type { TurnDetectionSession } from "../../../turn-detection-provider.js";
@@ -42,6 +43,11 @@ interface SherpaVadModule {
 }
 
 export function resolveBundledSileroVadModelPath(): string {
+  // In a scriptc binary (process.argv[0] === "scriptc") import.meta.url is the source path on the
+  // build machine, so the model ships beside the executable as assets/silero_vad.onnx.
+  if (process.argv[0] === "scriptc") {
+    return path.join(path.dirname(process.execPath), "assets", "silero_vad.onnx");
+  }
   return fileURLToPath(new URL("./assets/silero_vad.onnx", import.meta.url));
 }
 

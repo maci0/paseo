@@ -1,4 +1,4 @@
-import type { FormInfo, FormValue } from "@opencode/client";
+import type { FormInfo, FormValue, PermissionRequest } from "@opencode/client";
 import type { V2Api } from "./api.js";
 
 import type {
@@ -73,10 +73,12 @@ export class SessionPermissions {
     this.resolvePending(requestId, response);
   }
   async reconcile(sessionID: string) {
-    const [permissions, forms] = await Promise.all([
-      this.getClient().permission.list({ sessionID }),
-      this.getClient().session.form.list({ sessionID }),
-    ]);
+    // scriptc lowers Promise.all over the opencode client's calls only through typed promise bindings.
+    const permissionsRequest: Promise<PermissionRequest[]> = this.getClient().permission.list({
+      sessionID,
+    });
+    const formsRequest: Promise<FormInfo[]> = this.getClient().session.form.list({ sessionID });
+    const [permissions, forms] = await Promise.all([permissionsRequest, formsRequest]);
     for (const request of permissions) {
       if (this.pending.has(request.id)) continue;
       const pending: AgentPermissionRequest = {

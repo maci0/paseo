@@ -10,7 +10,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import type { PluginHookEvents, PluginHookAgent, AgentToolResult } from "@getpaseo/plugin/server";
 import { validateBeforeRequest, validateBeforeResult } from "./lifecycle/index.js";
-import { fork } from "node:child_process";
+import { forkPluginProcess } from "./plugin-node-launch.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
@@ -37,6 +37,7 @@ import { PluginProcessMessageSchema } from "./plugin-process-protocol.js";
 import { PluginSessionSocket } from "./session-socket.js";
 import { InternalPluginChild } from "./internal-child.js";
 import { evaluateBundle } from "./bundle-evaluator.js";
+import { type LoadedBuiltinPlugin, loadNativeBuiltinPlugin } from "./builtin/index.js";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const TOOL_CALL_TIMEOUT_MS = 10 * 60_000;
@@ -44,6 +45,8 @@ const MAX_LOG_ENTRIES = 500;
 const MAX_LOG_BYTES = 256 * 1024;
 const MAX_LOG_LINE_BYTES = 16 * 1024;
 const SOFT_SHUTDOWN_TIMEOUT_MS = 2_000;
+// A scriptc executable reports "scriptc" as argv[0]; Node reports its own path.
+const RUNNING_AS_SCRIPTC_BINARY = process.argv[0] === "scriptc";
 
 interface PluginOutputStream {
   on(event: "data", listener: (chunk: Buffer | string) => void): this;
@@ -181,7 +184,7 @@ class PluginOutputCapture {
 
   private emitLine(stream: PluginLogEntry["stream"]): void {
     let line = this.pending.get(stream) ?? Buffer.alloc(0);
-    if (!this.overflowed.has(stream) && line.at(-1) === 0x0d) line = line.subarray(0, -1);
+    if (!this.overflowed.has(stream) && line[line.length - 1] === 0x0d) line = line.subarray(0, -1);
     this.emit(stream, line.toString("utf8"));
     this.pending.set(stream, Buffer.alloc(0));
     this.overflowed.delete(stream);
@@ -233,11 +236,30 @@ function resolveWorkerExecArgv(): string[] {
   ];
 }
 
+async function compileBuiltinPlugin(
+  directory: string,
+  daemonVersion: string,
+  id: string,
+): Promise<LoadedBuiltinPlugin> {
+  const bundles = await compileDirectoryPlugin(directory, daemonVersion, id);
+  if (!bundles.serverBundle) throw new Error(`Built-in plugin ${id} needs a server entry`);
+  return {
+    manifest: bundles.manifest,
+    contribute: evaluateBundle(bundles.serverBundle),
+    clientBundle: bundles.clientBundle ?? "",
+  };
+}
+
 function spawnPluginChild(): PluginChild {
-  return fork(fileURLToPath(resolveWorkerUrl()), [], {
+  // A plugin process runs the plugin's esbuild bundle through eval, which a scriptc binary
+  // refuses (it has no JavaScript engine), and its paseo_frame messages carry Uint8Array,
+  // which the binary's newline-delimited JSON IPC cannot. The plugin fails to load instead.
+  if (RUNNING_AS_SCRIPTC_BINARY) {
+    throw new Error("Plugins with a server entry need the Node.js daemon, not a native binary");
+  }
+  return forkPluginProcess({
+    entry: fileURLToPath(resolveWorkerUrl()),
     execArgv: resolveWorkerExecArgv(),
-    serialization: "advanced",
-    stdio: ["ignore", "pipe", "pipe", "ipc"],
   }) as PluginChild;
 }
 
@@ -343,16 +365,20 @@ export class PluginRuntime {
     if (this.plugins.has(input.id)) throw new Error(`Plugin is already running: ${input.id}`);
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
     const directory = path.resolve(input.directory);
-    const bundles = await compileDirectoryPlugin(directory, this.daemonVersion, input.id);
-    const { manifest } = bundles;
-    if (!bundles.serverBundle) throw new Error(`Built-in plugin ${input.id} needs a server entry`);
+    const plugin = RUNNING_AS_SCRIPTC_BINARY
+      ? await loadNativeBuiltinPlugin({
+          id: input.id,
+          directory,
+          daemonVersion: this.daemonVersion,
+        })
+      : await compileBuiltinPlugin(directory, this.daemonVersion, input.id);
     const loaded = await this.launchPlugin({
       pluginId: input.id,
       pluginDirectory: directory,
-      requirements: manifest.requirements,
-      child: new InternalPluginChild(evaluateBundle(bundles.serverBundle)),
+      requirements: plugin.manifest.requirements,
+      child: new InternalPluginChild(plugin.contribute),
       bundle: "",
-      clientBundle: bundles.clientBundle ?? "",
+      clientBundle: plugin.clientBundle,
     });
     this.plugins.set(input.id, loaded);
     this.notifySessionOpenChange(loaded);
@@ -539,7 +565,8 @@ export class PluginRuntime {
   }
 
   async drainEvents(): Promise<void> {
-    await Promise.all(this.pendingEvents);
+    // An array: scriptc lowers Promise.all over an array of promises only.
+    await Promise.all(Array.from(this.pendingEvents));
   }
 
   async wait(
@@ -1113,7 +1140,8 @@ export class PluginRuntime {
       version: message.version,
       capabilities,
       send: (input) => this.sendProviderInput(loaded, connectionId, state, input),
-      onEvent(listener) {
+      // Typed explicitly: scriptc loses the contextual type of an object-literal method parameter.
+      onEvent(listener: (event: ProviderEvent) => void) {
         state.listeners.add(listener);
         return () => state.listeners.delete(listener);
       },
@@ -1319,7 +1347,7 @@ export class PluginRuntime {
       this.failRemoteProviderConnection(state, new Error(`Plugin process exited: ${loaded.id}`));
     }
     loaded.providerConnections.clear();
-    await loaded.sessionClosed;
+    await (loaded.sessionClosed ?? Promise.resolve());
     if (wasPublished) this.notify(loaded.id, `Plugin process exited: ${loaded.id}`);
   }
 

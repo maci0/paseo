@@ -70,20 +70,25 @@ export class ChunkedTransport {
       return rejected;
     }
     this.queuedBytes += byteLength;
-    let result: void | Promise<void>;
-    try {
-      result = this.pending ? this.pending.then(write) : write();
-    } catch (error) {
-      this.queuedBytes -= byteLength;
-      this.activeBytes = 0;
-      throw error;
-    }
+    // scriptc compiles this file from dist JS, where only JSDoc carries types.
+    /** @returns {void | Promise<void>} */
+    const start = (): void | Promise<void> => {
+      try {
+        return this.pending ? this.pending.then(write) : write();
+      } catch (error) {
+        this.queuedBytes -= byteLength;
+        this.activeBytes = 0;
+        throw error;
+      }
+    };
+    const result = start();
     if (!result) {
       this.queuedBytes -= byteLength;
       this.activeBytes = 0;
       return Promise.resolve();
     }
-    const completion = Promise.resolve(result).finally(() => {
+    /** @type {Promise<void>} */
+    const completion: Promise<void> = Promise.resolve(result).finally(() => {
       this.queuedBytes -= byteLength;
       this.activeBytes = 0;
     });

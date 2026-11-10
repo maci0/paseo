@@ -39,12 +39,22 @@ const nodeDependencies: FileObserverDependencies = {
       onChange(filename === null ? null : filename.toString());
     });
     watcher.on("error", onError);
-    return watcher;
+    // A record over the watcher: scriptc cannot view an FSWatcher as the FileWatch interface.
+    return { close: () => watcher.close() };
   },
-  setTimeout,
-  clearTimeout,
-  setInterval,
-  clearInterval,
+  // Wrapped: scriptc cannot pass the timer globals as values.
+  setTimeout(callback, delayMs) {
+    return setTimeout(callback, delayMs);
+  },
+  clearTimeout(handle) {
+    clearTimeout(handle);
+  },
+  setInterval(callback, delayMs) {
+    return setInterval(callback, delayMs);
+  },
+  clearInterval(handle) {
+    clearInterval(handle);
+  },
 };
 
 export class FileObserver {

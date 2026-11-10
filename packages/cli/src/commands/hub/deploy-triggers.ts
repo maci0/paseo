@@ -1,3 +1,4 @@
+import { type Stats } from "node:fs";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { HubCommandError } from "./error.js";
@@ -65,7 +66,7 @@ export async function discoverHubTriggers(cwd: string): Promise<HubDeployTrigger
 async function readTriggerDirectoryStats(
   root: string,
   directory: string,
-): Promise<Awaited<ReturnType<typeof lstat>>> {
+): Promise<Stats> {
   try {
     return await lstat(directory);
   } catch (error) {
@@ -100,7 +101,7 @@ async function legacyBundleExists(root: string): Promise<boolean> {
 async function readStats(
   target: string,
   missing: { code: string; message: string },
-): Promise<Awaited<ReturnType<typeof lstat>>> {
+): Promise<Stats> {
   try {
     return await lstat(target);
   } catch (error) {

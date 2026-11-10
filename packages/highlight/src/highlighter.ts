@@ -56,11 +56,13 @@ export function* highlightCodeInSteps(
   return yield* highlightLinesInSteps(code, lines, tree, lines.length);
 }
 
+// These yield only `undefined`, but are typed `HighlightStep`: the native build (scriptc)
+// cannot compile a generator whose yield type is `undefined` alone.
 function* parseInSteps(
   parser: Parser,
   code: string,
   stopAt?: number,
-): Generator<undefined, Tree, void> {
+): Generator<HighlightStep, Tree, void> {
   const parse = parser.startParse(code);
   if (stopAt !== undefined) parse.stopAt(stopAt);
   for (let step = 1; ; step++) {
@@ -76,8 +78,9 @@ function* highlightLinesInSteps(
   lines: string[],
   tree: Tree,
   lineCount: number,
-): Generator<undefined, HighlightToken[][], void> {
-  const result: HighlightToken[][] = lines.slice(0, lineCount).map(() => []);
+): Generator<HighlightStep, HighlightToken[][], void> {
+  // A typed empty array: scriptc types a bare `[]` from the callback as `number[]`.
+  const result: HighlightToken[][] = lines.slice(0, lineCount).map((): HighlightToken[] => []);
   const tokens = new LineTokenWriter(code, lines, result);
   let chunkFrom = 0;
   for (let first = 0; first < lineCount; first += LINES_PER_UNIT) {

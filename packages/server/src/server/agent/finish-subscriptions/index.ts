@@ -69,6 +69,32 @@ function key(record: FinishSubscription): string {
   return JSON.stringify([record.callerAgentId, record.childAgentId, record.serverId]);
 }
 
+// scriptc lowers only top-level generic functions, so the queue state is passed in.
+interface MutationQueue {
+  tail: Promise<void>;
+}
+function serialize<T>(queue: MutationQueue, action: () => Promise<T>): Promise<T> {
+  const result = queue.tail.then(action);
+  queue.tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  let abort!: () => void;
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(signal.reason);
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    return await Promise.race([operation, cancellation]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
 /** Owns durable intent, live observation, supersession, and dispatch acknowledgment. */
 export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptions {
   const tasks = new Set<Promise<void>>();
@@ -76,15 +102,7 @@ export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptio
   let closed = false;
   let recovering = true;
   const registering = new Map<string, number>();
-  let mutations = Promise.resolve();
-  function serialize<T>(action: () => Promise<T>): Promise<T> {
-    const result = mutations.then(action);
-    mutations = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
+  const mutations: MutationQueue = { tail: Promise.resolve() };
   function attach(records: FinishSubscription[], pending: boolean): Watch {
     let decide!: Watch["decide"];
     const decision = new Promise<boolean>((resolve) => {
@@ -122,19 +140,6 @@ export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptio
       );
     } catch (error) {
       if (!signal.aborted) throw error;
-    }
-  }
-  async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-    let abort!: () => void;
-    const cancellation = new Promise<never>((_resolve, reject) => {
-      abort = () => reject(signal.reason);
-      if (signal.aborted) abort();
-      else signal.addEventListener("abort", abort, { once: true });
-    });
-    try {
-      return await Promise.race([operation, cancellation]);
-    } finally {
-      signal.removeEventListener("abort", abort);
     }
   }
   async function decisions(group: Set<Watch>): Promise<void> {
@@ -182,7 +187,9 @@ export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptio
       if (signal.aborted) return false;
       if (request && permissions.has(request.id)) continue;
       const title = result.final?.title ?? record.childAgentId;
-      const receipt = deps.messages().enqueue({
+      // scriptc cannot call a method on a call result directly.
+      const delivery = deps.messages();
+      const receipt = delivery.enqueue({
         recipientId: record.callerAgentId,
         prompt: formatFinishNotificationBody({
           childAgentId: record.childAgentId,
@@ -312,7 +319,7 @@ export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptio
       return false;
     },
     start: () =>
-      serialize(async () => {
+      serialize(mutations, async () => {
         const groups = new Map<string, FinishSubscription[]>();
         for (const record of await deps.store.list()) {
           const records = groups.get(key(record)) ?? [];
@@ -324,7 +331,7 @@ export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptio
       }),
     register: (input, pendingDispatch = false) => {
       registering.set(input.callerAgentId, (registering.get(input.callerAgentId) ?? 0) + 1);
-      return serialize(async () => {
+      return serialize(mutations, async () => {
         if (closed) throw new Error("Finish subscriptions are closed");
         const record: FinishSubscription = {
           ...input,
@@ -342,14 +349,14 @@ export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptio
             watch.pending = false;
             for (const prior of predecessors) stop(prior, actualGroup);
             watch.decide(true);
-            void serialize(async () => {
+            void serialize(mutations, async () => {
               for (const prior of predecessors) await remove(prior);
             }).catch((error) =>
               deps.logger.error({ err: error }, "Failed to remove superseded finish subscriptions"),
             );
           },
           reject: () =>
-            serialize(async () => {
+            serialize(mutations, async () => {
               await remove(watch);
               stop(watch, actualGroup);
             }),
@@ -364,14 +371,15 @@ export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptio
     },
     async close() {
       closed = true;
-      await mutations;
+      await mutations.tail;
       for (const group of watches.values())
         for (const watch of group) {
           watch.controller.abort();
           watch.decide(false);
         }
-      await mutations;
-      await Promise.all(tasks);
+      await mutations.tail;
+      // scriptc lowers Promise.all over an array, not a Set.
+      await Promise.all(Array.from(tasks));
       await deps.store.list();
       // Dispatch may still be pending. The delivery owner drains it after observers stop.
     },

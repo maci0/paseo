@@ -51,7 +51,7 @@ export class OwnedSubscriptions {
     let disposed = false;
     let overflow = false;
     const buffered: SessionOutboundMessage[] = [];
-    const observers = new Set<SubscriptionObserver<SubscriptionSnapshot<T>>>();
+    const observers: SubscriptionObserver<SubscriptionSnapshot<T>>[] = [];
     let resolve!: (snapshot: SubscriptionSnapshot<T>) => void;
     let reject!: (error: unknown) => void;
     const ready = new Promise<SubscriptionSnapshot<T>>((accept, fail) => {
@@ -139,12 +139,13 @@ export class OwnedSubscriptions {
         if (teardown) return teardown;
         disposed = true;
         signal?.removeEventListener("abort", abort);
-        observers.clear();
+        observers.length = 0;
         buffered.length = 0;
         if (id) this.routes.delete(id);
         reject(new Error("Subscription released"));
         teardown = (async () => {
-          await pending;
+          const pendingRelease = pending;
+          if (pendingRelease) await pendingRelease;
           await releaseId();
           this.registrations.delete(registration);
         })();
@@ -162,7 +163,7 @@ export class OwnedSubscriptions {
       release: registration.release,
       subscribe: (observer) => {
         if (disposed) throw new Error("Subscription released");
-        observers.add(observer);
+        if (!observers.includes(observer)) observers.push(observer);
         if (overflow) {
           overflow = false;
           snapshot = undefined;
@@ -177,7 +178,8 @@ export class OwnedSubscriptions {
           for (const message of buffered) deliver(observer, message);
         }
         return () => {
-          observers.delete(observer);
+          const index = observers.indexOf(observer);
+          if (index >= 0) observers.splice(index, 1);
         };
       },
     };

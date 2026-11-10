@@ -33,12 +33,7 @@ interface NormalizeCliCommandErrorOptions {
   isAuthFailureText: (text: string) => boolean;
   createAuthError: (stderr: string) => Error;
   createMissingError: () => Error;
-  createCommandError: (params: {
-    args: string[];
-    cwd: string;
-    exitCode: number | null;
-    stderr: string;
-  }) => Error;
+  createCommandError: (params: ForgeCommandFailureParams) => Error;
 }
 
 interface ParseCliJsonOutputOptions<T> {
@@ -194,7 +189,9 @@ export function createCachedCliPathResolver(
     if (pending) {
       return pending;
     }
-    const current: Promise<string | null> = resolve()
+    // Declared before assignment: scriptc cannot lower a const read inside its own initializer.
+    let current: Promise<string | null> | null = null;
+    current = resolve()
       .then((path) => {
         if (path === null && pending === current) {
           pending = null;
@@ -242,24 +239,27 @@ export function normalizeCliCommandError(options: NormalizeCliCommandErrorOption
   if (options.isAuthFailureText(stderr) || options.isAuthFailureText(message)) {
     return options.createAuthError(stderr);
   }
-  if (failure.killed === true && options.timeoutMs !== undefined) {
-    return options.createCommandError({
-      args: options.args,
-      cwd: options.cwd,
-      exitCode: null,
-      stderr:
-        stderr ||
-        `${options.commandName} was terminated before completing (timed out after ${options.timeoutMs}ms or exceeded the output limit)`,
-      ...(stdout ? { stdout } : {}),
-    });
+  // stdout is set by assignment, not a conditional spread: scriptc cannot width-coerce the spread.
+  const params: ForgeCommandFailureParams =
+    failure.killed === true && options.timeoutMs !== undefined
+      ? {
+          args: options.args,
+          cwd: options.cwd,
+          exitCode: null,
+          stderr:
+            stderr ||
+            `${options.commandName} was terminated before completing (timed out after ${options.timeoutMs}ms or exceeded the output limit)`,
+        }
+      : {
+          args: options.args,
+          cwd: options.cwd,
+          exitCode: typeof failure.code === "number" ? failure.code : null,
+          stderr: stderr || message,
+        };
+  if (stdout) {
+    params.stdout = stdout;
   }
-  return options.createCommandError({
-    args: options.args,
-    cwd: options.cwd,
-    exitCode: typeof failure.code === "number" ? failure.code : null,
-    stderr: stderr || message,
-    ...(stdout ? { stdout } : {}),
-  });
+  return options.createCommandError(params);
 }
 
 export function parseCliJsonOutput<T>(options: ParseCliJsonOutputOptions<T>): T {

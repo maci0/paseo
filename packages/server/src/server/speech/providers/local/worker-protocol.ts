@@ -1,3 +1,5 @@
+import type { Serializable } from "node:child_process";
+
 import type {
   StreamingTranscriptionCommittedEvent,
   StreamingTranscriptionEvent,
@@ -121,3 +123,13 @@ export interface LocalSpeechTtsResult {
 }
 
 export type LocalSpeechTranscriptionResult = TranscriptionResult;
+
+// scriptc refuses an IPC send whose static message type is not JSON-shaped, and these types
+// carry LocalSpeechWorkerBytes (an ArrayBuffer under Node). Sends go through this to hide the
+// type; at run time a scriptc binary only ever holds base64 strings there.
+export function toWorkerIpcMessage(
+  message: LocalSpeechWorkerRequest | LocalSpeechWorkerToParentMessage,
+): Serializable {
+  const value: unknown = message;
+  return value as Serializable;
+}

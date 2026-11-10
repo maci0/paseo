@@ -37,8 +37,11 @@ export const interpString = new ExternalTokenizer((input) => {
       case backslash:
         const next = input.peek(1);
         if (next === braceL || next === braceR) return;
+        // Both advances, rather than falling through to `default`, so the file also
+        // compiles under the server's noFallthroughCasesInSwitch (the native build reads it).
         input.advance();
-      // FALLTHROUGH
+        input.advance();
+        break;
       default:
         input.advance();
     }

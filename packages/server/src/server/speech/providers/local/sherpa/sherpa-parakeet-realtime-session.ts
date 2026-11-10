@@ -1,9 +1,15 @@
 import { EventEmitter } from "node:events";
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "node:crypto";
 
-import type { StreamingTranscriptionSession } from "../../../speech-provider.js";
+import type {
+  StreamingTranscriptionEvent,
+  StreamingTranscriptionSession,
+} from "../../../speech-provider.js";
 import { pcm16lePeakAbs, pcm16leToFloat32 } from "../../../audio.js";
-import { SherpaOfflineRecognizerEngine } from "./sherpa-offline-recognizer.js";
+import {
+  recognizerResultText,
+  SherpaOfflineRecognizerEngine,
+} from "./sherpa-offline-recognizer.js";
 
 export class SherpaParakeetRealtimeTranscriptionSession
   extends EventEmitter
@@ -34,7 +40,7 @@ export class SherpaParakeetRealtimeTranscriptionSession
     if (this.connected) {
       return;
     }
-    this.currentSegmentId = uuidv4();
+    this.currentSegmentId = randomUUID();
     this.connected = true;
   }
 
@@ -66,10 +72,15 @@ export class SherpaParakeetRealtimeTranscriptionSession
         const previousSegmentId = this.previousSegmentId;
 
         this.emit("committed", { segmentId, previousSegmentId });
-        this.emit("transcript", { segmentId, transcript: finalText, isFinal: true });
+        const event: StreamingTranscriptionEvent = {
+          segmentId,
+          transcript: finalText,
+          isFinal: true,
+        };
+        this.emit("transcript", event);
 
         this.previousSegmentId = segmentId;
-        this.currentSegmentId = uuidv4();
+        this.currentSegmentId = randomUUID();
         this.lastPartialText = "";
         this.pcm16 = Buffer.alloc(0);
       } catch (err) {
@@ -83,7 +94,7 @@ export class SherpaParakeetRealtimeTranscriptionSession
       return;
     }
     this.pcm16 = Buffer.alloc(0);
-    this.currentSegmentId = uuidv4();
+    this.currentSegmentId = randomUUID();
     this.lastPartialText = "";
   }
 
@@ -114,11 +125,12 @@ export class SherpaParakeetRealtimeTranscriptionSession
       this.lastDecodeAt = Date.now();
       if (text !== this.lastPartialText) {
         this.lastPartialText = text;
-        this.emit("transcript", {
+        const event: StreamingTranscriptionEvent = {
           segmentId: this.currentSegmentId,
           transcript: text,
           isFinal: false,
-        });
+        };
+        this.emit("transcript", event);
       }
     } finally {
       this.decoding = false;
@@ -147,11 +159,7 @@ export class SherpaParakeetRealtimeTranscriptionSession
       this.engine.acceptWaveform(stream, this.engine.sampleRate, floatSamples);
       this.engine.recognizer.decode(stream);
       const result = this.engine.recognizer.getResult(stream);
-      return String(
-        (typeof result === "object" && result && "text" in result ? result.text : undefined) ??
-          result ??
-          "",
-      ).trim();
+      return recognizerResultText(result).trim();
     } finally {
       try {
         stream.free?.();

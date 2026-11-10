@@ -160,7 +160,7 @@ export async function runAttachCommand(
 
     await waitForStop();
     console.log("\n\nDetaching from agent...");
-    unsubscribe();
+    unsubscribe.stop();
     await client.close();
   } catch (err) {
     await client.close().catch(() => {});

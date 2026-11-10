@@ -206,7 +206,8 @@ export class OpenCodeV2Session implements AgentSession {
   }
   private async reconnect() {
     if (!this.acquire) throw new Error("OpenCode helper server exited");
-    await this.stream;
+    // scriptc cannot await a nullable promise; Promise.resolve() takes the same one tick as await null.
+    await (this.stream ?? Promise.resolve());
     await this.sync.catch(() => undefined);
     await this.connection
       .unbindSession(this.id, this.config.cwd)
@@ -422,10 +423,9 @@ export class OpenCodeV2Session implements AgentSession {
     if (deniesOwnRequest) this.turns.requestDenied();
   }
   private async reconcileSnapshot() {
-    const [info, history] = await Promise.all([
-      this.client.session.get({ sessionID: this.id }),
-      messages(this.client, this.id),
-    ]);
+    // scriptc lowers Promise.all over the opencode client's calls only through typed promise bindings.
+    const infoRequest: Promise<SessionInfo> = this.client.session.get({ sessionID: this.id });
+    const [info, history] = await Promise.all([infoRequest, messages(this.client, this.id)]);
     this.info = info;
     this.history = history;
     await this.timeline.messages(history, (event) => this.emitTimeline(event));
@@ -565,7 +565,7 @@ export class OpenCodeV2Session implements AgentSession {
     this.turns.close();
     this.streamAbort.abort();
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
-    await this.stream;
+    await (this.stream ?? Promise.resolve());
     await this.reconnecting?.catch(() => undefined);
     await this.sync.catch(() => undefined);
     await this.connection

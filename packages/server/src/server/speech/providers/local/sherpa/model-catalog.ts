@@ -254,7 +254,42 @@ const DOLPHIN_LANGUAGES = [
   "az",
 ] as const;
 
-export const SHERPA_ONNX_MODEL_CATALOG = {
+// Catalog order: speech to text first, then text to speech; listings and defaults follow it.
+const STT_MODEL_ID_LIST = [
+  "parakeet-tdt-0.6b-v2-int8",
+  "parakeet-tdt-110m-en-int8",
+  "parakeet-tdt-0.6b-v3-int8",
+  "whisper-tiny-en",
+  "whisper-base",
+  "whisper-turbo",
+  "sense-voice-int8",
+  "dolphin-base-int8",
+  "giga-am-v3-ru",
+  "parakeet-tdt-ctc-0.6b-ja-int8",
+] as const;
+
+const TTS_MODEL_ID_LIST = [
+  "kokoro-en-v0_19",
+  "kokoro-int8-en-v0_19",
+  "kokoro-int8-multi-lang-v1_1",
+  "kitten-nano-en-v0_2-fp16",
+  "piper-en-us-libritts-r",
+  "piper-en-gb-alba",
+  "piper-de-thorsten",
+  "piper-fr-siwis",
+  "piper-es-davefx",
+] as const;
+
+export type LocalSttModelId = (typeof STT_MODEL_ID_LIST)[number];
+export type LocalTtsModelId = (typeof TTS_MODEL_ID_LIST)[number];
+export type SherpaOnnxModelId = LocalSttModelId | LocalTtsModelId;
+export type LocalSpeechModelId = SherpaOnnxModelId;
+
+// One value type for every entry: a scriptc binary cannot read a record by a computed key when
+// its fields have different types. Each id's kind is checked against its list below.
+export const SHERPA_ONNX_MODEL_CATALOG: Readonly<
+  Record<SherpaOnnxModelId, SherpaOnnxCatalogEntry>
+> = {
   "parakeet-tdt-0.6b-v2-int8": {
     kind: "stt-offline",
     label: "Parakeet v2",
@@ -465,40 +500,33 @@ export const SHERPA_ONNX_MODEL_CATALOG = {
     ...releaseArchive("tts-models", "vits-piper-es_ES-davefx-medium-int8"),
     engine: piperEngine("es_ES-davefx-medium"),
   },
-} as const satisfies Record<string, SherpaOnnxCatalogEntry>;
+};
 
-export type SherpaOnnxModelId = keyof typeof SHERPA_ONNX_MODEL_CATALOG;
-export type LocalSpeechModelId = SherpaOnnxModelId;
+export const LOCAL_STT_MODEL_IDS: LocalSttModelId[] = [...STT_MODEL_ID_LIST];
 
-type ModelIdByKind<K extends SherpaOnnxModelKind> = {
-  [Id in SherpaOnnxModelId]: (typeof SHERPA_ONNX_MODEL_CATALOG)[Id]["kind"] extends K ? Id : never;
-}[SherpaOnnxModelId];
+export const LOCAL_TTS_MODEL_IDS: LocalTtsModelId[] = [...TTS_MODEL_ID_LIST];
 
-export type LocalSttModelId = ModelIdByKind<"stt-offline">;
-export type LocalTtsModelId = ModelIdByKind<"tts">;
+const ALL_MODEL_IDS: SherpaOnnxModelId[] = [...LOCAL_STT_MODEL_IDS, ...LOCAL_TTS_MODEL_IDS];
 
-const ALL_MODEL_IDS: SherpaOnnxModelId[] = Object.keys(SHERPA_ONNX_MODEL_CATALOG).filter(
-  (k): k is SherpaOnnxModelId => k in SHERPA_ONNX_MODEL_CATALOG,
-);
-
-function isLocalSttModelId(id: SherpaOnnxModelId): id is LocalSttModelId {
-  return SHERPA_ONNX_MODEL_CATALOG[id].kind !== "tts";
+function catalogKindMismatch(kind: SherpaOnnxModelKind, ids: readonly SherpaOnnxModelId[]) {
+  return ids.filter((id) => SHERPA_ONNX_MODEL_CATALOG[id].kind !== kind);
 }
 
-function isLocalTtsModelId(id: SherpaOnnxModelId): id is LocalTtsModelId {
-  return SHERPA_ONNX_MODEL_CATALOG[id].kind === "tts";
+const MISLISTED_MODEL_IDS = [
+  ...catalogKindMismatch("stt-offline", LOCAL_STT_MODEL_IDS),
+  ...catalogKindMismatch("tts", LOCAL_TTS_MODEL_IDS),
+];
+if (MISLISTED_MODEL_IDS.length > 0) {
+  throw new Error(
+    `Local speech catalog lists models under the wrong kind: ${MISLISTED_MODEL_IDS.join(", ")}`,
+  );
 }
-
-export const LOCAL_STT_MODEL_IDS: LocalSttModelId[] = ALL_MODEL_IDS.filter(isLocalSttModelId);
-
-export const LOCAL_TTS_MODEL_IDS: LocalTtsModelId[] = ALL_MODEL_IDS.filter(isLocalTtsModelId);
 
 function resolveDefaultModelId(role: "stt"): LocalSttModelId;
 function resolveDefaultModelId(role: "tts"): LocalTtsModelId;
 function resolveDefaultModelId(role: DefaultModelRole): SherpaOnnxModelId {
   const match = ALL_MODEL_IDS.find((id) => {
-    const entry: SherpaOnnxCatalogEntry = SHERPA_ONNX_MODEL_CATALOG[id];
-    return entry.defaultFor === role;
+    return SHERPA_ONNX_MODEL_CATALOG[id].defaultFor === role;
   });
   if (!match) {
     throw new Error(`No default model configured for role '${role}'`);
@@ -548,17 +576,47 @@ export function getSherpaOnnxModelSpec(id: SherpaOnnxModelId): SherpaOnnxModelSp
 }
 
 // Every path an engine names, so the downloader can verify an install.
+// In the order the engine types declare them. Fields are read one by one: a scriptc binary
+// cannot iterate a record whose fields have different types.
 export function engineFiles(engine: SttEngine | TtsEngine): string[] {
-  return Object.entries(engine).flatMap(([key, value]) => {
-    if (key === "family") return [];
-    return typeof value === "string" ? [value] : (value as readonly string[]);
-  });
+  switch (engine.family) {
+    case "transducer":
+      return [engine.encoder, engine.decoder, engine.joiner, engine.tokens];
+    case "whisper":
+      return [engine.encoder, engine.decoder, engine.tokens];
+    case "sense_voice":
+    case "dolphin":
+    case "nemo_ctc":
+      return [engine.model, engine.tokens];
+    case "kokoro":
+      return [
+        engine.model,
+        engine.voices,
+        engine.tokens,
+        engine.dataDir,
+        ...(engine.lexicons ?? []),
+        ...(engine.dictDir === undefined ? [] : [engine.dictDir]),
+        ...(engine.ruleFsts ?? []),
+      ];
+    case "kitten":
+      return [engine.model, engine.voices, engine.tokens, engine.dataDir];
+    case "vits":
+      return [engine.model, engine.tokens, engine.dataDir];
+  }
 }
 
 export function getLocalSttEngine(id: LocalSttModelId): SttEngine {
-  return SHERPA_ONNX_MODEL_CATALOG[id].engine;
+  const entry = SHERPA_ONNX_MODEL_CATALOG[id];
+  if (entry.kind !== "stt-offline") {
+    throw new Error(`Not a speech-to-text model: ${id}`);
+  }
+  return entry.engine;
 }
 
 export function getLocalTtsEngine(id: LocalTtsModelId): TtsEngine {
-  return SHERPA_ONNX_MODEL_CATALOG[id].engine;
+  const entry = SHERPA_ONNX_MODEL_CATALOG[id];
+  if (entry.kind !== "tts") {
+    throw new Error(`Not a text-to-speech model: ${id}`);
+  }
+  return entry.engine;
 }

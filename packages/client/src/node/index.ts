@@ -24,17 +24,85 @@ export interface HostTransportOptions {
   webSocketAgent?: (url: string) => Agent | undefined;
 }
 
+type SocketSendData = Parameters<WebSocket["send"]>[0];
+type SocketSendCallback = (err?: Error) => void;
+interface SocketSendOptions {
+  mask?: boolean;
+  binary?: boolean;
+  compress?: boolean;
+  fin?: boolean;
+}
+
+/**
+ * A ws socket whose sends are charged to the host transport budget until ws
+ * reports them written. A subclass, because scriptc cannot reassign `socket.send`.
+ */
+class BudgetedWebSocket extends WebSocket {
+  assertCapacity: (bytes: number) => void = () => {};
+  reserve: (bytes: number) => () => void = () => () => {};
+  private readonly pendingReleases = new Set<() => void>();
+
+  override send(data: SocketSendData, cb?: SocketSendCallback): void;
+  override send(data: SocketSendData, options: SocketSendOptions, cb?: SocketSendCallback): void;
+  override send(
+    data: SocketSendData,
+    optionsOrCallback?: SocketSendOptions | SocketSendCallback,
+    cb?: SocketSendCallback,
+  ): void {
+    const callback = typeof optionsOrCallback === "function" ? optionsOrCallback : cb;
+    const options = typeof optionsOrCallback === "function" ? undefined : optionsOrCallback;
+    const bytes =
+      typeof data === "string" ? Buffer.byteLength(data) : Buffer.byteLength(data as Uint8Array);
+    this.assertCapacity(bytes);
+    const release = this.reserve(bytes);
+    this.pendingReleases.add(release);
+    try {
+      super.send(data, options ?? {}, (error) => {
+        release();
+        this.pendingReleases.delete(release);
+        callback?.(error);
+      });
+    } catch (error) {
+      release();
+      this.pendingReleases.delete(release);
+      throw error;
+    }
+  }
+
+  /** terminate(), callable from a stored closure: scriptc rejects that call written outside the class (SC3004). */
+  forceClose(): void {
+    this.terminate();
+  }
+
+  releasePending(): void {
+    for (const release of this.pendingReleases) release();
+    this.pendingReleases.clear();
+  }
+}
+
+/**
+ * Registers a close listener through the loose socket interface: scriptc rejects
+ * `.on()` called on the ws class itself (SC3004). The JSDoc types are for scriptc,
+ * which compiles this file from dist JS where the TypeScript annotations are gone.
+ * @param {import("../daemon-client-transport-types.js").WebSocketLike} socket
+ * @param {() => void} listener
+ * @returns {void}
+ */
+function onSocketClose(socket: WebSocketLike, listener: () => void): void {
+  socket.on?.("close", listener);
+}
+
 /** A factory owns one attempt, including a fresh SSH process and its teardown. */
 export function createHostTransportFactory(
   connection: string,
   budget = new HostTransportBudget(),
   options: HostTransportOptions = {},
 ): DaemonTransportFactory {
-  const target = parseHostTarget(connection);
+  const target: HostTarget = parseHostTarget(connection);
   // Rises to "protected" once the daemon negotiates it, so a later attempt
   // cannot be downgraded to legacy endpoint security.
-  let securityFloor: SecurityMode | undefined =
-    target.kind === "socket" ? target.offer?.minimumSecurityMode : undefined;
+  let securityFloor: SecurityMode | undefined;
+  if (target.kind === "socket" && target.offer) securityFloor = target.offer.minimumSecurityMode;
   return (attemptOptions) => {
     const opens = new Set<() => void>();
     const closes = new Set<(event?: unknown) => void>();
@@ -61,13 +129,40 @@ export function createHostTransportFactory(
         }
       }
     };
+    const wrapper: DaemonTransport = {
+      supportsDrain: undefined,
+      maxFrameBytes: undefined,
+      send(data) {
+        if (closed || !transport) throw new Error("Host transport is unavailable");
+        return transport.send(data);
+      },
+      close,
+      onOpen(handler) {
+        opens.add(handler);
+        return () => opens.delete(handler);
+      },
+      onClose(handler) {
+        closes.add(handler);
+        return () => closes.delete(handler);
+      },
+      onError(handler) {
+        errors.add(handler);
+        return () => errors.delete(handler);
+      },
+      onMessage(handler) {
+        messages.add(handler);
+        return () => messages.delete(handler);
+      },
+    };
     void (async () => {
       let socketTarget: Extract<HostTarget, { kind: "socket" }>;
       if (target.kind === "ssh") {
         const tunnel = await createSshTunnel(target.ssh);
         sshTunnel = tunnel;
         teardown = () => tunnel.close();
-        socketTarget = parseHostTarget(tunnel.endpoint) as Extract<HostTarget, { kind: "socket" }>;
+        const tunnelTarget: HostTarget = parseHostTarget(tunnel.endpoint);
+        if (tunnelTarget.kind !== "socket") throw new Error("SSH tunnel endpoint is not a socket");
+        socketTarget = tunnelTarget;
       } else socketTarget = target;
       if (closed) {
         teardown();
@@ -75,7 +170,7 @@ export function createHostTransportFactory(
       }
       const socketPath = socketTarget.socketPath?.replace(/^~(?=\/)/, homedir());
       let factory = createWebSocketTransportFactory((url, socketOptions) => {
-        const socket = new WebSocket(
+        const socket = new BudgetedWebSocket(
           socketPath && url.startsWith("ws+unix:") ? `ws+unix://${socketPath}:/ws` : url,
           socketOptions?.protocols,
           {
@@ -85,7 +180,7 @@ export function createHostTransportFactory(
             maxPayload: 100 * 1024 * 1024,
           },
         );
-        disposeSocket = () => socket.terminate();
+        disposeSocket = () => socket.forceClose();
         assertOutboundCapacity = (bytes) => {
           if (socket.bufferedAmount + bytes > 128 * 1024 * 1024) {
             throw Object.assign(new Error("Host socket buffer limit reached"), {
@@ -94,39 +189,11 @@ export function createHostTransportFactory(
           }
           budget.assertCapacity(bytes);
         };
-        const pending = new Set<() => void>();
-        const send = socket.send.bind(socket);
-        socket.send = (data, ...args: unknown[]) => {
-          const bytes =
-            typeof data === "string"
-              ? Buffer.byteLength(data)
-              : Buffer.byteLength(data as Uint8Array);
-          assertOutboundCapacity(bytes);
-          const release = budget.reserve(bytes);
-          pending.add(release);
-          const callback = args.find(
-            (value): value is (error?: Error) => void => typeof value === "function",
-          );
-          const sendOptions = args.find((value) => value !== null && typeof value === "object") as
-            | { binary?: boolean }
-            | undefined;
-          try {
-            send(data, sendOptions ?? {}, (error) => {
-              release();
-              pending.delete(release);
-              callback?.(error);
-            });
-          } catch (error) {
-            release();
-            pending.delete(release);
-            throw error;
-          }
-        };
-        socket.once("close", () => {
-          for (const release of pending) release();
-          pending.clear();
-        });
-        return socket as unknown as WebSocketLike;
+        socket.assertCapacity = (bytes) => assertOutboundCapacity(bytes);
+        socket.reserve = (bytes) => budget.reserve(bytes);
+        const socketLike = socket as unknown as WebSocketLike;
+        onSocketClose(socketLike, () => socket.releasePending());
+        return socketLike;
       });
       if (socketTarget.offer)
         factory = createRelayE2eeTransportFactory({
@@ -140,6 +207,8 @@ export function createHostTransportFactory(
           assertOutboundCapacity: (bytes) => assertOutboundCapacity(bytes),
         });
       transport = factory({ ...attemptOptions, url: socketTarget.url });
+      wrapper.supportsDrain = transport.supportsDrain;
+      wrapper.maxFrameBytes = transport.maxFrameBytes;
       transport.onOpen(() => {
         if (!closed) for (const handler of opens) handler();
       });
@@ -171,35 +240,7 @@ export function createHostTransportFactory(
       for (const handler of errors) handler(new Error("Host transport failed"));
       close();
     });
-    return {
-      get supportsDrain() {
-        return transport?.supportsDrain;
-      },
-      get maxFrameBytes() {
-        return transport?.maxFrameBytes;
-      },
-      send(data) {
-        if (closed || !transport) throw new Error("Host transport is unavailable");
-        return transport.send(data);
-      },
-      close,
-      onOpen(handler) {
-        opens.add(handler);
-        return () => opens.delete(handler);
-      },
-      onClose(handler) {
-        closes.add(handler);
-        return () => closes.delete(handler);
-      },
-      onError(handler) {
-        errors.add(handler);
-        return () => errors.delete(handler);
-      },
-      onMessage(handler) {
-        messages.add(handler);
-        return () => messages.delete(handler);
-      },
-    };
+    return wrapper;
   };
 }
 export function createHostClient(
@@ -207,10 +248,12 @@ export function createHostClient(
   config: Omit<DaemonClientConfig, "url" | "transportFactory"> & HostTransportOptions,
   budget?: HostTransportBudget,
 ): DaemonClient {
-  const target = parseHostTarget(connection);
-  const { webSocketAgent, ...clientConfig } = config;
+  const target: HostTarget = parseHostTarget(connection);
+  // scriptc cannot pack a rest binding of this type, so config is spread whole;
+  // DaemonClient ignores the extra webSocketAgent key.
+  const { webSocketAgent } = config;
   return new DaemonClient({
-    ...clientConfig,
+    ...config,
     url: "ws://host-connector/ws",
     ...(target.password ? { password: target.password } : {}),
     transportFactory: createHostTransportFactory(connection, budget, { webSocketAgent }),

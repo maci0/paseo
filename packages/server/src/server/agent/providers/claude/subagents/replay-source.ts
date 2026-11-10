@@ -129,6 +129,14 @@ function readUsage(entry: ClaudeReplayEntry): ClaudeSubagentUsage | null {
   return totalTokens === undefined ? null : { totalTokens };
 }
 
+// scriptc lowers no `for await` over an iterable union read from a record field, but over an
+// async generator. Values pass through unchanged, sync ones awaited as `for await` does.
+export async function* replayEntries<T>(
+  entries: Iterable<T> | AsyncIterable<T>,
+): AsyncGenerator<T> {
+  yield* entries;
+}
+
 export interface ClaudeReplaySubagentInput {
   agentId: string;
   meta: ClaudeSubagentMeta | null;
@@ -262,7 +270,7 @@ async function observeSubagent(
   let childTerminalStatus: ProviderSubagentStatus | null = null;
 
   // Consume each source once for presentation and timeline; keep no raw transcript records.
-  for await (const entry of subagent.entries) {
+  for await (const entry of replayEntries(subagent.entries)) {
     const timestamp = normalizeProviderReplayTimestamp(entry.timestamp);
     if (!seenEntry) firstTimestamp = timestamp;
     seenEntry = true;

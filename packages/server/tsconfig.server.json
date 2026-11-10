@@ -26,7 +26,6 @@
     "src/server/**/*",
     "src/services/**/*",
     "src/terminal/**/*",
-    "src/executable-resolution/which.d.ts"
   ],
   "exclude": [
     "node_modules",

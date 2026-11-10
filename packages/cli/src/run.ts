@@ -14,7 +14,8 @@ export function createCliParseArgv(input: {
   nodeArgv?: [string, string];
 }): string[] | { kind: "open-project"; resolvedPath: string } {
   const program = createCli();
-  const knownCommands = new Set(program.commands.map((command) => command.name()));
+  const knownCommands: string[] = [];
+  for (const command of program.commands) knownCommands.push(command.name());
   const invocation = classifyInvocation({
     argv: input.argv,
     knownCommands,
@@ -40,6 +41,8 @@ export function createCliParseArgv(input: {
 // is written, as `paseo ls | head -1` or a launcher that discards output does.
 // Drop the output nobody reads and let the command finish, instead of surfacing
 // the failed write as an uncaught error.
+let stdoutErrorHooked = false;
+
 function ignoreClosedStdout(error: NodeJS.ErrnoException): void {
   if (error.code !== "EPIPE") {
     throw error;
@@ -47,8 +50,9 @@ function ignoreClosedStdout(error: NodeJS.ErrnoException): void {
 }
 
 export async function runCli(argv: string[], options: RunCliOptions = {}): Promise<number> {
-  if (!process.stdout.listeners("error").includes(ignoreClosedStdout)) {
+  if (!stdoutErrorHooked) {
     process.stdout.on("error", ignoreClosedStdout);
+    stdoutErrorHooked = true;
   }
 
   const parseArgv = createCliParseArgv({

@@ -7,6 +7,7 @@ import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import {
   PluginIdSchema,
   type PluginLogEntry,
+  type PluginInstallation,
   type PluginListItem,
   type PluginSource,
   type PluginSourceStatusItem,
@@ -21,7 +22,7 @@ import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirement
 import { BUILTIN_PROVIDER_IDS } from "@getpaseo/protocol/provider-manifest";
 import type { DaemonConfigStore } from "../daemon-config-store.js";
 import { type ManagedPluginCandidate, ManagedPluginSources } from "./managed-source.js";
-import { readPluginManifest } from "./manifest.js";
+import { type PluginManifest, readPluginManifest } from "./manifest.js";
 import { expandTilde } from "../../utils/path.js";
 import { runPluginBuild } from "./preparation.js";
 import { PluginRuntime } from "./runtime.js";
@@ -81,6 +82,40 @@ function resolvePluginStatus(input: {
 }): PluginListItem["status"] {
   if (!input.enabled || !input.globallyEnabled) return "disabled";
   return input.running ? "running" : "failed";
+}
+
+// Built whole, in the key order of the earlier field-by-field assignments: scriptc cannot read or
+// assign the optional fields of a PluginListItem after creation.
+function buildPluginListItem(input: {
+  id: string;
+  path: string;
+  enabled: boolean;
+  status: PluginListItem["status"];
+  manifest: PluginManifest | null;
+  installation: PluginInstallation | undefined;
+  error: string | undefined;
+}): PluginListItem {
+  const { manifest, installation, error, status } = input;
+  const identity = installation?.identity;
+  return {
+    id: input.id,
+    path: input.path,
+    enabled: input.enabled,
+    status,
+    ...(manifest
+      ? {
+          name: manifest.name,
+          description: manifest.description,
+          icon: manifest.icon,
+          media: manifest.media,
+        }
+      : {}),
+    installation,
+    ...(identity?.kind === "git"
+      ? { source: "git" as const, remote: identity.remote, commit: installation?.currentRevision }
+      : {}),
+    ...(error && status === "failed" ? { error } : {}),
+  };
 }
 
 export class PluginService {
@@ -247,36 +282,26 @@ export class PluginService {
     const plugins = await Promise.all(
       Object.entries(config.plugins ?? {}).map(async ([id, source]) => {
         const enabled = source.enabled !== false;
-        const item: PluginListItem = {
-          id,
-          path: source.path,
+        const status = resolvePluginStatus({
           enabled,
-          status: resolvePluginStatus({
-            enabled,
-            globallyEnabled: config.pluginsEnabled === true,
-            running: running.has(id),
-          }),
-        };
+          globallyEnabled: config.pluginsEnabled === true,
+          running: running.has(id),
+        });
         const manifest = await readPluginManifest(path.resolve(source.path)).catch(() => null);
-        if (manifest) {
-          item.name = manifest.name;
-          item.description = manifest.description;
-          item.icon = manifest.icon;
-          item.media = manifest.media;
-        }
-        item.installation = await this.managedSources
+        let installation: PluginInstallation | undefined = await this.managedSources
           ?.describe(id, source.path)
           .catch(() => undefined);
         if (!this.managedSources)
-          item.installation = { identity: { kind: "directory", path: path.resolve(source.path) } };
-        if (item.installation?.identity.kind === "git") {
-          item.source = "git";
-          item.remote = item.installation.identity.remote;
-          item.commit = item.installation.currentRevision;
-        }
-        const error = this.errors.get(id);
-        if (error && item.status === "failed") item.error = error;
-        return item;
+          installation = { identity: { kind: "directory", path: path.resolve(source.path) } };
+        return buildPluginListItem({
+          id,
+          path: source.path,
+          enabled,
+          status,
+          manifest,
+          installation,
+          error: this.errors.get(id),
+        });
       }),
     );
     return plugins.sort((left, right) => left.id.localeCompare(right.id));

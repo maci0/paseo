@@ -164,18 +164,21 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
     },
     async waitForDispatch(recipientId, signal) {
       signal.throwIfAborted();
-      const admitted =
-        pending.get(recipientId)?.messages.map((message) => message.receipt.dispatched) ?? [];
+      // An array, not a tuple of the current dispatch and the receipts: scriptc lowers neither
+      // mixed tuples nor `Promise.all` over them. Promise.all treats a missing dispatch as resolved.
+      const admitted: Promise<unknown>[] = [];
+      const current = dispatching.get(recipientId);
+      if (current) admitted.push(current);
+      for (const message of pending.get(recipientId)?.messages ?? []) {
+        admitted.push(message.receipt.dispatched);
+      }
       let aborted!: () => void;
       const cancellation = new Promise<never>((_resolve, reject) => {
         aborted = () => reject(new DOMException("Wait aborted", "AbortError"));
         signal.addEventListener("abort", aborted, { once: true });
       });
       try {
-        await Promise.race([
-          Promise.all([dispatching.get(recipientId), ...admitted]),
-          cancellation,
-        ]);
+        await Promise.race([Promise.all(admitted), cancellation]);
       } finally {
         signal.removeEventListener("abort", aborted);
       }
@@ -185,7 +188,8 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
       closed = true;
       for (const recipientId of pending.keys()) flush(recipientId);
       // Each failure is reported and rejects its receipts; shutdown still drains other recipients.
-      closing = Promise.allSettled(dispatching.values()).then(() => undefined);
+      // oxlint-disable-next-line unicorn/no-useless-spread -- scriptc lowers Promise.allSettled only over arrays.
+      closing = Promise.allSettled([...dispatching.values()]).then(() => undefined);
       return closing;
     },
   };

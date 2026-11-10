@@ -403,6 +403,6 @@ async function runFollowMode({
 
   await waitForStop();
   writer.end();
-  unsubscribe();
+  unsubscribe.stop();
   await client.close();
 }

@@ -74,6 +74,8 @@ function globalNodeModulesPath(globalRootPath: string): string {
 }
 
 function resolveCurrentServerPackageRoot(): string | null {
+  // A scriptc binary is never an npm install; its import.meta.url names the build machine.
+  if (process.argv[0] === "scriptc") return null;
   return resolvePackageRootFrom(fileURLToPath(import.meta.url), "@getpaseo/server");
 }
 

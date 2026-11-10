@@ -1,7 +1,15 @@
+// Plain signatures rather than `typeof setTimeout`: scriptc cannot use the global timer
+// functions as values, so callers pass wrappers.
 export interface TerminalOutputCoalescerTimers {
-  setTimeout: typeof setTimeout;
-  clearTimeout: typeof clearTimeout;
+  setTimeout: (callback: () => void, ms?: number) => ReturnType<typeof setTimeout>;
+  clearTimeout: (timer: ReturnType<typeof setTimeout>) => void;
 }
+
+/** The global timers, wrapped. */
+export const TERMINAL_OUTPUT_COALESCER_GLOBAL_TIMERS: TerminalOutputCoalescerTimers = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
 
 export interface TerminalOutputCoalescerFlush {
   payload: Buffer;

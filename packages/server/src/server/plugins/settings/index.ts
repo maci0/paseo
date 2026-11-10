@@ -6,8 +6,17 @@ import { defineSettings, settingsRpc, type SettingsDefinition } from "@getpaseo/
 import type { PluginSettings, PluginSettingsState } from "@getpaseo/plugin/server";
 
 const envelopeSchema = z.object({ version: z.number().int().positive(), values: z.json() });
+// zod's ZodError is a $constructor whose Symbol.hasInstance tests this brand; scriptc cannot
+// lower `instanceof` against a value that is not a class declared in the program.
+interface ZodBrand {
+  _zod?: { traits?: Set<string> };
+}
+function isZodError(error: unknown): error is z.ZodError {
+  if (typeof error !== "object" || error === null) return false;
+  return (error as ZodBrand)._zod?.traits?.has("ZodError") === true;
+}
 function message(error: unknown): string {
-  if (error instanceof z.ZodError) return error.issues.map((issue) => issue.message).join("\n");
+  if (isZodError(error)) return error.issues.map((issue) => issue.message).join("\n");
   return error instanceof Error ? error.message : String(error);
 }
 const revisionOf = (raw: string) => createHash("sha256").update(raw).digest("hex");
@@ -68,7 +77,7 @@ export class PluginSettingsStore {
       this.serial(() => this.write(definition, input.revision, {}, "reset", notify));
     const settings: PluginSettings<Schema> = {
       read,
-      subscribe(listener) {
+      subscribe(listener: SettingsListener<Schema>) {
         listeners.add(listener);
         return () => {
           listeners.delete(listener);

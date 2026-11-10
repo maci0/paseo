@@ -1,5 +1,5 @@
 import { z } from "zod";
-import Ajv, { type ErrorObject, type Options as AjvOptions } from "ajv";
+import { createJsonSchemaCompiler } from "./json-schema-validator.js";
 import type { AgentProvider, AgentSessionConfig } from "./agent-sdk-types.js";
 import type { AgentManager } from "./agent-manager.js";
 
@@ -135,23 +135,15 @@ function buildZodValidator<T>(schema: z.ZodType, schemaName: string): SchemaVali
 }
 
 function buildJsonSchemaValidator<T>(schema: JsonSchema): SchemaValidator<T> {
-  const AjvConstructor = Ajv as unknown as {
-    new (options?: AjvOptions): {
-      compile: (input: JsonSchema) => ((value: unknown) => boolean) & {
-        errors?: ErrorObject[] | null;
-      };
-    };
-  };
-  const ajv = new AjvConstructor({ allErrors: true, strict: false });
-  const validate = ajv.compile(schema);
+  const compiled = createJsonSchemaCompiler().compile(schema);
   return {
     jsonSchema: schema,
     validate: (value) => {
-      const ok = validate(value);
-      if (ok) {
+      const validationErrors = compiled.validate(value);
+      if (validationErrors.length === 0) {
         return { ok: true, value: value as T };
       }
-      const errors = (validate.errors ?? []).map((error: ErrorObject) => {
+      const errors = validationErrors.map((error) => {
         const path =
           error.instancePath && error.instancePath.length > 0 ? error.instancePath : "(root)";
         const message = error.message ?? "is invalid";

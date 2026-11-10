@@ -205,7 +205,7 @@ async function writeNewPidLock(pidPath: string, lockInfo: PidLockInfo): Promise<
   let fd;
   try {
     fd = await open(pidPath, "wx");
-    await fd.write(JSON.stringify(lockInfo));
+    await fd.writeFile(JSON.stringify(lockInfo));
   } catch (error) {
     if (!isErrnoException(error) || error.code !== "EEXIST") {
       throw error;
@@ -296,12 +296,14 @@ export async function refreshPidLock(
 
 async function readPidLockFromHandle(fd: FileHandle): Promise<PidLockInfo | null> {
   try {
-    const { size } = await fd.stat();
+    const stats = await fd.stat();
+    const size = stats.size;
     if (size === 0) {
       return null;
     }
     const content = Buffer.alloc(size);
-    const { bytesRead } = await fd.read(content, 0, size, 0);
+    const read = await fd.read(content, 0, size, 0);
+    const bytesRead = read.bytesRead;
     return parsePidLockInfo(JSON.parse(content.subarray(0, bytesRead).toString("utf-8")));
   } catch {
     return null;

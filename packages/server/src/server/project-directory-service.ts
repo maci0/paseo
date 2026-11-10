@@ -37,11 +37,16 @@ interface CreateProjectDirectoryDependencies {
 }
 
 const nodeProjectDirectoryFileSystem: ProjectDirectoryFileSystem = {
-  stat,
+  // Wrapped: scriptc cannot use library functions as values.
+  stat(path) {
+    return stat(path);
+  },
   async mkdir(path) {
     await mkdir(path);
   },
-  rmdir,
+  rmdir(path) {
+    return rmdir(path);
+  },
 };
 
 export async function createProjectDirectory(

@@ -12,7 +12,7 @@ export type JsonValue =
  * it replaces unsupported values (undefined, functions, symbols) with null
  * so responses always make it back to the client.
  */
-export function ensureValidJson<T>(value: T): T {
+export function ensureValidJson<T>(value: T): JsonValue {
   const seen = new WeakSet<object>();
 
   const sanitize = (current: unknown): JsonValue => {
@@ -57,5 +57,5 @@ export function ensureValidJson<T>(value: T): T {
     return null;
   };
 
-  return sanitize(value) as T;
+  return sanitize(value);
 }

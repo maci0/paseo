@@ -103,7 +103,9 @@ export class DaemonExecutions implements HubExecutionAgents {
     }
 
     const authorityGeneration = this.authorityGeneration;
-    const create = this.createOrResolve(owner, input, authorityGeneration).finally(() => {
+    // Assigned after declaration: scriptc cannot reference a const from its own initializer.
+    let create: Promise<OwnedAgentSnapshot> | null = null;
+    create = this.createOrResolve(owner, input, authorityGeneration).finally(() => {
       if (this.pendingCreates.get(key) === create) {
         this.pendingCreates.delete(key);
       }

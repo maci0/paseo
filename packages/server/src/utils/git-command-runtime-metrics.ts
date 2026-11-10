@@ -59,7 +59,11 @@ export class GitCommandRuntimeMetricsWindow {
   ) {}
 
   submit(operation: string, provenance = "unattributed"): GitCommandRuntimeMetric {
-    const metric = { queuedAtMs: this.clock(), startedAtMs: null, provenance };
+    const metric: GitCommandRuntimeMetric = {
+      queuedAtMs: this.clock(),
+      startedAtMs: null,
+      provenance,
+    };
     this.pendingCommands.add(metric);
     this.submittedCount += 1;
     this.operationCounts.set(operation, (this.operationCounts.get(operation) ?? 0) + 1);

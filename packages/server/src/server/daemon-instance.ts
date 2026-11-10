@@ -12,17 +12,7 @@ import {
 import { daemonLaunchEnvironment } from "./config-environment.js";
 import { readPersistedConfig } from "./persisted-config.js";
 import { reapTerminalWorkers } from "../terminal/terminal-worker-reaper.js";
-import treeKill from "tree-kill";
-const killTree = (pid: number, signal: string): Promise<void> =>
-  new Promise((resolve, reject) =>
-    treeKill(pid, signal, (error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve();
-    }),
-  );
+import { killProcessTree } from "../utils/tree-kill.js";
 
 // Process ownership only: desktop and CLI load this entry in their own processes.
 // Keep daemon bootstrap and WebSocket schemas out of its dependency tree.
@@ -132,7 +122,7 @@ async function requestInstanceStop(
             "DAEMON_REPLACED",
             `Supervisor changed for ${home}; refusing forced cleanup.`,
           );
-        await killTree(instance.pid, "SIGKILL");
+        await killProcessTree(instance.pid, "SIGKILL");
         forced = true;
       }
     } else if (!options.force) {
@@ -141,7 +131,7 @@ async function requestInstanceStop(
         `PID ${instance.pid} for ${home} has no graceful shutdown channel. Use --force explicitly to terminate it.`,
       );
     } else {
-      await killTree(instance.pid, "SIGKILL");
+      await killProcessTree(instance.pid, "SIGKILL");
       forced = true;
     }
   } else {
@@ -213,7 +203,7 @@ export async function stopDaemonInstance(
   };
   let stopped = await waitForExit(forced ? killTimeoutMs : Math.max(0, deadline - Date.now()));
   if (!stopped && options.force && !forced) {
-    await killTree(instance.pid, "SIGKILL");
+    await killProcessTree(instance.pid, "SIGKILL");
     forced = true;
     stopped = await waitForExit(killTimeoutMs);
   }
@@ -342,7 +332,7 @@ export async function startDaemonInstance(input: {
         delay(15_000, false, { ref: false }),
       ]);
       if (!stopped && child.pid) {
-        await killTree(child.pid, "SIGKILL");
+        await killProcessTree(child.pid, "SIGKILL");
         await exited;
       }
     }

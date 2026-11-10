@@ -52,17 +52,32 @@ export interface ReconciliationClock {
   clearInterval(timer: ReconciliationTimer): void;
 }
 
+// Wraps a Node timer: scriptc cannot convert the timer handle to the ReconciliationTimer record.
+class SystemTimer implements ReconciliationTimer {
+  constructor(readonly handle: ReturnType<typeof setTimeout>) {}
+
+  unref(): void {
+    this.handle.unref();
+  }
+}
+
 const systemClock: ReconciliationClock = {
-  setTimeout: (callback, delayMs) => setTimeout(() => void callback(), delayMs),
-  clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
-  setInterval: (callback, delayMs) => setInterval(() => void callback(), delayMs),
-  clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+  setTimeout: (callback, delayMs) => new SystemTimer(setTimeout(() => void callback(), delayMs)),
+  clearTimeout: (timer) => clearTimeout((timer as SystemTimer).handle),
+  setInterval: (callback, delayMs) => new SystemTimer(setInterval(() => void callback(), delayMs)),
+  clearInterval: (timer) => clearInterval((timer as SystemTimer).handle),
 };
 
-const watchProjectRoot: ProjectRootWatch = (rootPath, options, onChange, onError) => {
-  const watcher = watchPath(rootPath, options, onChange);
+// The options are always { recursive: false }, which is fs.watch's default; scriptc has no
+// lowering for fs.watch with a recursive option, so they are not passed. The listener and the
+// watcher are wrapped because scriptc lowers only (eventType, filename: string | null)
+// listeners and cannot convert an FSWatcher to the ProjectRootWatcher record.
+const watchProjectRoot: ProjectRootWatch = (rootPath, _options, onChange, onError) => {
+  const watcher = watchPath(rootPath, (eventType: string, filename: string | null) =>
+    onChange(eventType, filename),
+  );
   watcher.on("error", onError);
-  return watcher;
+  return { close: () => watcher.close() };
 };
 
 export type ReconciliationChange =
@@ -601,32 +616,11 @@ export class WorkspaceReconciliationService {
       await new Promise<void>((resolve) => this.inspectionWaiters.add(resolve));
     }
     if (this.disposed) return "unreadable";
-    let pending = this.pendingInspections.get(targetPath);
-    if (!pending) {
-      pending = Promise.resolve()
-        .then(() => this.directoryInspection(targetPath))
-        .catch((error) => {
-          if (isMissingPathError(error)) return "missing" as const;
-          this.logger.warn(
-            { err: error, targetPath },
-            "Skipped workspace reconciliation after directory inspection failed",
-          );
-          return "unreadable" as const;
-        })
-        .finally(() => {
-          this.pendingInspections.delete(targetPath);
-          this.timedOutPaths.delete(targetPath);
-          this.wakeInspectionWaiters();
-          if (this.inspectionSaturated && this.timedOutPaths.size === 0) {
-            this.inspectionSaturated = false;
-            this.logger.info(
-              {},
-              "Timed-out workspace directory inspections drained; reconciliation capacity restored",
-            );
-          }
-        });
-      this.pendingInspections.set(targetPath, pending);
-    }
+    // A const with one type: scriptc does not narrow a `let` after assignment in a branch,
+    // and Promise.race needs promise-typed entries.
+    const existing = this.pendingInspections.get(targetPath);
+    const pending: Promise<DirectoryState> =
+      existing !== undefined ? existing : this.startDirectoryInspection(targetPath);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -653,6 +647,33 @@ export class WorkspaceReconciliationService {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private startDirectoryInspection(targetPath: string): Promise<DirectoryState> {
+    const pending = Promise.resolve()
+      .then(() => this.directoryInspection(targetPath))
+      .catch((error) => {
+        if (isMissingPathError(error)) return "missing" as const;
+        this.logger.warn(
+          { err: error, targetPath },
+          "Skipped workspace reconciliation after directory inspection failed",
+        );
+        return "unreadable" as const;
+      })
+      .finally(() => {
+        this.pendingInspections.delete(targetPath);
+        this.timedOutPaths.delete(targetPath);
+        this.wakeInspectionWaiters();
+        if (this.inspectionSaturated && this.timedOutPaths.size === 0) {
+          this.inspectionSaturated = false;
+          this.logger.info(
+            {},
+            "Timed-out workspace directory inspections drained; reconciliation capacity restored",
+          );
+        }
+      });
+    this.pendingInspections.set(targetPath, pending);
+    return pending;
   }
 }
 

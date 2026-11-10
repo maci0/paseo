@@ -17,6 +17,7 @@ import type {
   LocalSpeechWorkerRequest,
   LocalSpeechWorkerToParentMessage,
 } from "./worker-protocol.js";
+import { toWorkerIpcMessage } from "./worker-protocol.js";
 import { bufferToWorkerBytes, workerBytesToBuffer } from "./worker-bytes.js";
 
 process.title = "Paseo Voice";
@@ -30,7 +31,13 @@ const logger = pino({
 const sttEngines = new Map<string, LocalSttEngine>();
 const sttProviders = new Map<string, SherpaOnnxParakeetSTT>();
 const ttsProviders = new Map<string, SherpaOnnxTTS>();
-const sessions = new Map<string, StreamingTranscriptionSession | TurnDetectionSession>();
+// Requests dispatch on the recorded kind: `"commit" in session` is false in a scriptc binary
+// for methods a class defines, so it cannot tell the session kinds apart.
+type TrackedSession =
+  | { kind: "transcription"; session: StreamingTranscriptionSession }
+  | { kind: "turnDetection"; session: TurnDetectionSession };
+
+const sessions = new Map<string, TrackedSession>();
 const unsubscribeBySessionId = new Map<string, Array<() => void>>();
 let ipcClosing = false;
 
@@ -39,7 +46,7 @@ function sendToParent(message: LocalSpeechWorkerToParentMessage): void {
     return;
   }
   try {
-    process.send(message, (error) => {
+    process.send(toWorkerIpcMessage(message), (error) => {
       if (error) {
         ipcClosing = true;
       }
@@ -145,18 +152,20 @@ function cleanupSession(sessionId: string): void {
     }
   }
   unsubscribeBySessionId.delete(sessionId);
-  const session = sessions.get(sessionId);
+  const tracked = sessions.get(sessionId);
   sessions.delete(sessionId);
   try {
-    session?.close();
+    tracked?.session.close();
   } catch {
     // ignore
   }
 }
 
-function trackTranscriptionSession(
+// The tracking functions are generic so each call site passes the session's own class: a scriptc
+// binary cannot reach EventEmitter's inherited on() through the session interfaces.
+function trackTranscriptionSession<Session extends StreamingTranscriptionSession>(
   sessionId: string,
-  session: StreamingTranscriptionSession,
+  session: Session,
 ): void {
   session.on("committed", (payload) => {
     sendToParent({ type: "session.committed", sessionId, payload });
@@ -174,7 +183,10 @@ function trackTranscriptionSession(
   unsubscribeBySessionId.set(sessionId, []);
 }
 
-function trackTurnDetectionSession(sessionId: string, session: TurnDetectionSession): void {
+function trackTurnDetectionSession<Session extends TurnDetectionSession>(
+  sessionId: string,
+  session: Session,
+): void {
   session.on("speech_started", () => {
     sendToParent({ type: "session.speech_started", sessionId });
   });
@@ -206,19 +218,23 @@ async function createSession(
     const session = provider.createSession({ logger });
     trackTurnDetectionSession(message.sessionId, session);
     await session.connect();
-    sessions.set(message.sessionId, session);
+    sessions.set(message.sessionId, { kind: "turnDetection", session });
     return { requiredSampleRate: session.requiredSampleRate };
   }
 
   const model = message.kind === "voiceStt" ? "voice" : "dictation";
   const engine = getSttEngine(message.config, model);
-  const session =
-    message.kind === "voiceStt"
-      ? getSttProvider(message.config, "voice").createSession({ logger })
-      : new SherpaParakeetRealtimeTranscriptionSession({ engine });
+  if (message.kind === "voiceStt") {
+    const session = getSttProvider(message.config, "voice").createSession({ logger });
+    trackTranscriptionSession(message.sessionId, session);
+    await session.connect();
+    sessions.set(message.sessionId, { kind: "transcription", session });
+    return { requiredSampleRate: session.requiredSampleRate };
+  }
+  const session = new SherpaParakeetRealtimeTranscriptionSession({ engine });
   trackTranscriptionSession(message.sessionId, session);
   await session.connect();
-  sessions.set(message.sessionId, session);
+  sessions.set(message.sessionId, { kind: "transcription", session });
   return { requiredSampleRate: session.requiredSampleRate };
 }
 
@@ -246,29 +262,29 @@ function handleSessionRequest(message: LocalSpeechWorkerSessionRequest): void {
     return;
   }
 
-  const session = sessions.get(message.sessionId);
+  const tracked = sessions.get(message.sessionId);
   switch (message.type) {
     case "session.append":
-      session?.appendPcm16(workerBytesToBuffer(message.audio));
+      tracked?.session.appendPcm16(workerBytesToBuffer(message.audio));
       break;
     case "session.commit":
-      if (session && "commit" in session) {
-        session.commit();
+      if (tracked?.kind === "transcription") {
+        tracked.session.commit();
       }
       break;
     case "session.clear":
-      if (session && "clear" in session) {
-        session.clear();
+      if (tracked?.kind === "transcription") {
+        tracked.session.clear();
       }
       break;
     case "session.flush":
-      if (session && "flush" in session) {
-        session.flush();
+      if (tracked?.kind === "turnDetection") {
+        tracked.session.flush();
       }
       break;
     case "session.reset":
-      if (session && "reset" in session) {
-        session.reset();
+      if (tracked?.kind === "turnDetection") {
+        tracked.session.reset();
       }
       break;
   }
@@ -307,7 +323,9 @@ async function handleRequest(message: LocalSpeechWorkerRequest): Promise<void> {
   handleSessionRequest(message);
 }
 
-process.on("message", (message: LocalSpeechWorkerRequest) => {
+// A scriptc binary types IPC listener parameters as JSON values, not as the message union.
+process.on("message", (raw: unknown) => {
+  const message = raw as LocalSpeechWorkerRequest;
   void handleRequest(message).catch((error: unknown) => {
     sendToParent({
       type: "response",

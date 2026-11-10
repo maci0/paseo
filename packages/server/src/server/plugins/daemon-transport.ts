@@ -52,15 +52,15 @@ export function createPluginDaemonTransportFactory(
         port.send({ type: "paseo_close" });
         closeTransport();
       },
-      onMessage(handler) {
+      onMessage(handler: (data: unknown, isBinary: boolean) => void) {
         messageHandlers.add(handler);
         return () => messageHandlers.delete(handler);
       },
-      onOpen(handler) {
+      onOpen(handler: () => void) {
         openHandlers.add(handler);
         return () => openHandlers.delete(handler);
       },
-      onClose(handler) {
+      onClose(handler: (event?: unknown) => void) {
         closeHandlers.add(handler);
         return () => closeHandlers.delete(handler);
       },

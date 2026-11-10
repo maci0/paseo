@@ -546,14 +546,18 @@ export async function archiveWorkspaceContents(
     ...liveAgents.map((agent) => agent.id),
     ...matchingStoredRecords.filter((record) => !record.archivedAt).map((record) => record.id),
   ]);
-  const archiveResults = await Promise.allSettled([
-    ...[...agentIdsToArchive].map((agentId) =>
+  // One element type: scriptc cannot compile a spread tuple of differently typed promises.
+  // Only rejection reasons are read, so the fulfilled values are dropped.
+  const archiveSteps: Promise<void>[] = [];
+  for (const agentId of agentIdsToArchive) {
+    archiveSteps.push(
       dependencies.agentManager.getAgent(agentId)
-        ? dependencies.agentManager.archiveAgent(agentId)
-        : dependencies.agentManager.archiveSnapshot(agentId, archivedAt),
-    ),
-    dependencies.killTerminalsForWorkspace(workspaceId),
-  ]);
+        ? dependencies.agentManager.archiveAgent(agentId).then(() => undefined)
+        : dependencies.agentManager.archiveSnapshot(agentId, archivedAt).then(() => undefined),
+    );
+  }
+  archiveSteps.push(dependencies.killTerminalsForWorkspace(workspaceId));
+  const archiveResults = await Promise.allSettled(archiveSteps);
 
   for (const result of archiveResults) {
     if (result.status === "rejected") {

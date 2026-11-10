@@ -136,7 +136,8 @@ export interface PaseoToolHostDependencies {
   findWorkspaceIdForCwd?: ArchiveDependencies["findWorkspaceIdForCwd"];
   listActiveWorkspaces?: ArchiveDependencies["listActiveWorkspaces"];
   archiveWorkspaceRecord?: ArchiveDependencies["archiveWorkspaceRecord"];
-  emitWorkspaceUpdatesForWorkspaceIds?: ArchiveDependencies["emitWorkspaceUpdatesForWorkspaceIds"];
+  // An array parameter: scriptc cannot take a function value whose parameter is Iterable<string>.
+  emitWorkspaceUpdatesForWorkspaceIds?: (workspaceIds: readonly string[]) => Promise<void>;
   workspaceRegistry?: Pick<WorkspaceRegistry, "get" | "list" | "upsert">;
   projectRegistry?: Pick<ProjectRegistry, "get" | "list">;
   createDirectoryWorkspace?: (
@@ -146,8 +147,9 @@ export interface PaseoToolHostDependencies {
     context?: { background?: boolean; callerWorkspaceId?: string },
   ) => Promise<PersistedWorkspaceRecord>;
   workspaceScripts?: Pick<WorkspaceScriptsService, "list" | "launch" | "stop">;
-  markWorkspaceArchiving?: ArchiveDependencies["markWorkspaceArchiving"];
-  clearWorkspaceArchiving?: ArchiveDependencies["clearWorkspaceArchiving"];
+  // Array parameters, as for emitWorkspaceUpdatesForWorkspaceIds.
+  markWorkspaceArchiving?: (workspaceIds: readonly string[], archivingAt: string) => void;
+  clearWorkspaceArchiving?: (workspaceIds: readonly string[]) => void;
   createPaseoWorktree?: CreatePaseoWorktreeWorkflowFn;
   // Mints a fresh directory workspace for a cwd and returns its id.
   ensureWorkspaceForCreate?: (
@@ -607,6 +609,24 @@ function resolveTerminalKeyToken({ key, literal, preamble }: TerminalKeyTokenInp
   );
 }
 
+// The test zod's Symbol.hasInstance makes for `instanceof z.ZodObject`: scriptc has no
+// `instanceof` against zod's constructor functions.
+function isZodObjectSchema(schema: PaseoToolConfig["inputSchema"]): boolean {
+  return (schema as z.ZodType | undefined)?._zod?.traits?.has("ZodObject") === true;
+}
+
+// Top level: scriptc supports generic functions only as top-level declarations.
+async function runScheduleAction<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof ScheduleStateConflictError) {
+      throw new PaseoToolInputError(error.message);
+    }
+    throw error;
+  }
+}
+
 export function createPaseoToolCatalog(options: PaseoToolHostDependencies): PaseoToolCatalog {
   return createToolCatalog(options, options.callerAgentId ? "agent" : "top-level");
 }
@@ -706,7 +726,8 @@ function createToolCatalog(
   const localHostOperations = new Map<string, HostOperation>();
   const tools = new Map<string, PaseoToolDefinition>();
   const builtinNames = new Set<string>();
-  const hostTools = new Map([
+  // Pair literals with explicit types: scriptc cannot seed a Map from an `as const` tuple array.
+  const hostTools = new Map<string, keyof HostOperations>([
     ["create_agent", "createAgent"],
     ["create_workspace", "createWorkspace"],
     ["list_workspaces", "listWorkspaces"],
@@ -714,7 +735,7 @@ function createToolCatalog(
     ["get_agent_status", "getStatus"],
     ["get_agent_activity", "getActivity"],
     ["list_agents", "listAgents"],
-  ] as const satisfies ReadonlyArray<readonly [string, keyof HostOperations]>);
+  ]);
   const hostResolver = createHostResolver({
     serverId: options.serverId ?? "self",
     callerAgentId,
@@ -744,7 +765,7 @@ function createToolCatalog(
     if (!isPaseoToolEnabled(options.paseoToolPolicy, name)) {
       return;
     }
-    const operation = hostTools.get(name as Parameters<typeof hostTools.get>[0]);
+    const operation = hostTools.get(name);
     if (operation) {
       localHostOperations.set(name, handler);
       const original = config.inputSchema;
@@ -757,10 +778,9 @@ function createToolCatalog(
       };
       config = {
         ...config,
-        inputSchema:
-          original instanceof z.ZodObject
-            ? original.extend(selector)
-            : { ...(original as z.ZodRawShape), ...selector },
+        inputSchema: isZodObjectSchema(original)
+          ? (original as z.ZodObject).extend(selector)
+          : { ...(original as z.ZodRawShape), ...selector },
       };
       handler = async ({ serverId, ...input }, context) => {
         const destination = serverId ?? options.serverId;
@@ -1032,17 +1052,6 @@ function createToolCatalog(
       );
     }
     return schedule;
-  }
-
-  async function runScheduleAction<T>(action: () => Promise<T>): Promise<T> {
-    try {
-      return await action();
-    } catch (error) {
-      if (error instanceof ScheduleStateConflictError) {
-        throw new PaseoToolInputError(error.message);
-      }
-      throw error;
-    }
   }
 
   async function requireCallerHeartbeat(id: string) {
@@ -1982,8 +1991,10 @@ function createToolCatalog(
         notification?.accept();
       }
       function rejectNotification(): void {
+        // Narrowed first: scriptc cannot lower `.catch` on an optional-call result.
+        if (!notification) return;
         void notification
-          ?.reject()
+          .reject()
           .catch((error) =>
             childLogger.error(
               { err: error, agentId },
@@ -3312,13 +3323,16 @@ function archiveWorktreeDependencies(
   if (!options.listActiveWorkspaces) {
     throw new Error("Active workspace lister is required to archive worktrees");
   }
-  if (!options.emitWorkspaceUpdatesForWorkspaceIds) {
+  const emitWorkspaceUpdates = options.emitWorkspaceUpdatesForWorkspaceIds;
+  if (!emitWorkspaceUpdates) {
     throw new Error("Workspace update emitter is required to archive worktrees");
   }
-  if (!options.markWorkspaceArchiving) {
+  const markWorkspaceArchiving = options.markWorkspaceArchiving;
+  if (!markWorkspaceArchiving) {
     throw new Error("Workspace archiving marker is required to archive worktrees");
   }
-  if (!options.clearWorkspaceArchiving) {
+  const clearWorkspaceArchiving = options.clearWorkspaceArchiving;
+  if (!clearWorkspaceArchiving) {
     throw new Error("Workspace archiving clearer is required to archive worktrees");
   }
   return {
@@ -3331,9 +3345,11 @@ function archiveWorktreeDependencies(
     findWorkspaceIdForCwd: options.findWorkspaceIdForCwd,
     listActiveWorkspaces: options.listActiveWorkspaces,
     archiveWorkspaceRecord: options.archiveWorkspaceRecord,
-    emitWorkspaceUpdatesForWorkspaceIds: options.emitWorkspaceUpdatesForWorkspaceIds,
-    markWorkspaceArchiving: options.markWorkspaceArchiving,
-    clearWorkspaceArchiving: options.clearWorkspaceArchiving,
+    // Copies the ids into arrays for the array-typed callbacks above.
+    emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) => emitWorkspaceUpdates([...workspaceIds]),
+    markWorkspaceArchiving: (workspaceIds, archivingAt) =>
+      markWorkspaceArchiving([...workspaceIds], archivingAt),
+    clearWorkspaceArchiving: (workspaceIds) => clearWorkspaceArchiving([...workspaceIds]),
     killTerminalsForWorkspace: (workspaceId: string) =>
       killTerminalsForWorkspace(
         {

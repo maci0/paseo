@@ -4,11 +4,11 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { Readable, Writable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 
-import { terminateWithTreeKill } from "../../../utils/tree-kill.js";
-import type { ProcessTerminator } from "../../../utils/tree-kill.js";
-import type {
+import { terminateChildWithTreeKill } from "../../../utils/tree-kill.js";
+import type { ChildProcessTerminator } from "../../../utils/tree-kill.js";
+import {
   ReadableStream as NodeReadableStream,
   WritableStream as NodeWritableStream,
 } from "node:stream/web";
@@ -39,6 +39,8 @@ import {
   type RequestPermissionResponse,
   type ResumeSessionResponse,
   type SessionConfigOption,
+  type SessionConfigSelectGroup,
+  type SessionConfigSelectOption,
   type SessionInfoUpdate,
   type SessionMode,
   type SessionModelState,
@@ -131,6 +133,7 @@ import {
   truncateForDiagnostic,
 } from "./diagnostic-utils.js";
 import { withTimeout } from "../../../utils/promise-timeout.js";
+import { requireNodeOnly } from "../../node-only-require.js";
 
 const ACP_AUTO_ACCEPT_FEATURE_ID = "auto_accept";
 
@@ -163,6 +166,84 @@ function rejectOnProcessFailure(child: ChildProcess, stderrChunks: string[]): Pr
       );
     });
   });
+}
+
+interface NodeStreamWebConversions {
+  Readable: { toWeb(stream: Readable): NodeReadableStream };
+  Writable: { toWeb(stream: Writable): NodeWritableStream };
+}
+
+// scriptc has no lowering for Readable.toWeb or Writable.toWeb, so Node loads them through
+// requireNodeOnly, which scriptc leaves to run time, and a scriptc
+// binary (argv[0] "scriptc") adapts the pipes with nativeReadableToWeb and nativeWritableToWeb.
+function loadNodeStreamWebConversions(): NodeStreamWebConversions {
+  const loaded = requireNodeOnly("node:stream") as NodeStreamWebConversions;
+  return loaded;
+}
+
+// Native build only: forwards chunks until the stream ends, pausing it while the web queue is full.
+function nativeReadableToWeb(stream: Readable): NodeReadableStream<Uint8Array> {
+  let finished = false;
+  return new NodeReadableStream<Uint8Array>({
+    start(controller) {
+      stream.on("data", (chunk: Buffer) => {
+        controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+        if ((controller.desiredSize ?? 1) <= 0) stream.pause();
+      });
+      stream.once("end", () => {
+        if (finished) return;
+        finished = true;
+        controller.close();
+      });
+      stream.once("error", (error: Error) => {
+        if (finished) return;
+        finished = true;
+        controller.error(error);
+      });
+    },
+    pull() {
+      stream.resume();
+    },
+    cancel() {
+      stream.destroy();
+    },
+  });
+}
+
+// Native build only: each write settles when the stream reports it written; close ends the stream.
+function nativeWritableToWeb(stream: Writable): NodeWritableStream<Uint8Array> {
+  return new NodeWritableStream<Uint8Array>({
+    write(chunk) {
+      return new Promise<void>((resolve, reject) => {
+        stream.write(chunk, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    },
+    close() {
+      return new Promise<void>((resolve) => {
+        stream.end(() => resolve());
+      });
+    },
+    abort() {
+      stream.destroy();
+    },
+  });
+}
+
+function childStdioToWeb(child: ChildProcessWithoutNullStreams): {
+  output: NodeWritableStream;
+  input: NodeReadableStream;
+} {
+  if (process.argv[0] === "scriptc") {
+    return { output: nativeWritableToWeb(child.stdin), input: nativeReadableToWeb(child.stdout) };
+  }
+  const nodeStreamWebConversions = loadNodeStreamWebConversions();
+  return {
+    output: nodeStreamWebConversions.Writable.toWeb(child.stdin),
+    input: nodeStreamWebConversions.Readable.toWeb(child.stdout),
+  };
 }
 
 async function isDirectory(target: string): Promise<boolean> {
@@ -506,7 +587,7 @@ interface ACPAgentClientOptions {
   extensionCommandsParser?: ACPExtensionCommandsParser;
   waitForInitialCommands?: boolean;
   initialCommandsWaitTimeoutMs?: number;
-  terminateProcess?: ProcessTerminator;
+  terminateProcess?: ChildProcessTerminator;
   now?: () => number;
 }
 
@@ -543,7 +624,7 @@ interface ACPAgentSessionOptions {
   launchEnv?: Record<string, string>;
   waitForInitialCommands?: boolean;
   initialCommandsWaitTimeoutMs?: number;
-  terminateProcess?: ProcessTerminator;
+  terminateProcess?: ChildProcessTerminator;
 }
 
 export interface SpawnedACPProcess {
@@ -974,12 +1055,12 @@ export class ACPAgentClient implements AgentClient {
   private readonly extensionCommandsParser?: ACPExtensionCommandsParser;
   private readonly importPromptCache = new Map<string, ACPImportPromptCacheEntry>();
   private readonly now: () => number;
-  protected readonly terminateProcess: ProcessTerminator;
+  protected readonly terminateProcess: ChildProcessTerminator;
 
   constructor(options: ACPAgentClientOptions) {
     this.provider = options.provider;
     this.usageProvider = options.usageProvider;
-    this.terminateProcess = options.terminateProcess ?? terminateWithTreeKill;
+    this.terminateProcess = options.terminateProcess ?? terminateChildWithTreeKill;
     this.capabilities = options.capabilities ?? DEFAULT_ACP_CAPABILITIES;
     this.logger = options.logger.child({
       module: "agent",
@@ -1453,11 +1534,11 @@ export class ACPAgentClient implements AgentClient {
       });
     });
 
-    const stream = createLoggedNdJsonStream(
-      Writable.toWeb(child.stdin),
-      Readable.toWeb(child.stdout),
-      { logger: this.logger, provider: this.provider },
-    );
+    const stdio = childStdioToWeb(child);
+    const stream = createLoggedNdJsonStream(stdio.output, stdio.input, {
+      logger: this.logger,
+      provider: this.provider,
+    });
     const connection = new ClientSideConnection(() => client, stream);
 
     return {
@@ -1484,20 +1565,20 @@ export class ACPAgentClient implements AgentClient {
       : null;
 
     try {
-      return await this.runACPRequest(() =>
-        Promise.race([
-          transport.connection.initialize({
-            protocolVersion: PROTOCOL_VERSION,
-            clientCapabilities: buildACPClientCapabilities(
-              this.clientCapabilityMeta,
-              clientCapabilities ?? this.clientCapabilities,
-            ),
-            clientInfo: { name: "Paseo", version: "dev" },
-          }),
-          transport.processError,
-          ...(initializeTimeoutPromise ? [initializeTimeoutPromise] : []),
-        ]),
-      );
+      return await this.runACPRequest(() => {
+        // scriptc lowers Promise.race over an array literal of typed promises only.
+        const initializeRequest: Promise<InitializeResponse> = transport.connection.initialize({
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: buildACPClientCapabilities(
+            this.clientCapabilityMeta,
+            clientCapabilities ?? this.clientCapabilities,
+          ),
+          clientInfo: { name: "Paseo", version: "dev" },
+        });
+        return initializeTimeoutPromise
+          ? Promise.race([initializeRequest, transport.processError, initializeTimeoutPromise])
+          : Promise.race([initializeRequest, transport.processError]);
+      });
     } finally {
       if (timeout) {
         clearTimeout(timeout);
@@ -1787,11 +1868,11 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private historyRuntimeReleased = false;
   private replayingHistory = false;
   private bootstrapThreadEventPending = false;
-  private readonly terminateProcess: ProcessTerminator;
+  private readonly terminateProcess: ChildProcessTerminator;
 
   constructor(config: AgentSessionConfig, options: ACPAgentSessionOptions) {
     this.provider = options.provider;
-    this.terminateProcess = options.terminateProcess ?? terminateWithTreeKill;
+    this.terminateProcess = options.terminateProcess ?? terminateChildWithTreeKill;
     this.capabilities = options.capabilities;
     this.logger = options.logger.child({ module: "agent", provider: options.provider });
     this.runtimeSettings = options.runtimeSettings;
@@ -2933,29 +3014,28 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       }
     });
 
-    const stream = createLoggedNdJsonStream(
-      Writable.toWeb(child.stdin),
-      Readable.toWeb(child.stdout),
-      { logger: this.logger, provider: this.provider },
-    );
+    const stdio = childStdioToWeb(child);
+    const stream = createLoggedNdJsonStream(stdio.output, stdio.input, {
+      logger: this.logger,
+      provider: this.provider,
+    });
     const connection = new ClientSideConnection(() => this, stream);
     // Take ownership before initialize so the outer initialization guard can
     // close the process even when the ACP handshake itself rejects.
     this.child = child;
     this.connection = connection;
-    const initialize = await this.runACPRequest(() =>
-      Promise.race([
-        connection.initialize({
-          protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: buildACPClientCapabilities(
-            this.clientCapabilityMeta,
-            this.clientCapabilities,
-          ),
-          clientInfo: { name: "Paseo", version: "dev" },
-        }),
-        processError,
-      ]),
-    );
+    const initialize = await this.runACPRequest(() => {
+      // scriptc lowers Promise.race over the SDK's call only through a typed promise binding.
+      const initializeRequest: Promise<InitializeResponse> = connection.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: buildACPClientCapabilities(
+          this.clientCapabilityMeta,
+          this.clientCapabilities,
+        ),
+        clientInfo: { name: "Paseo", version: "dev" },
+      });
+      return Promise.race([initializeRequest, processError]);
+    });
 
     return { child, connection, initialize };
   }
@@ -3106,21 +3186,26 @@ export class ACPAgentSession implements AgentSession, ACPClient {
         const item = this.createMessageTimelineItem("reasoning", update);
         return item ? [...pendingUserEvents, this.wrapTimeline(item)] : pendingUserEvents;
       }
-      case "tool_call":
+      case "tool_call": {
         this.fallbackAssistantMessageId = null;
+        // scriptc cannot pick a ToolCall | ToolCallUpdate arm for the session update; name it.
+        const toolCall: ToolCall = update;
         return [
           ...pendingUserEvents,
-          ...this.handleToolCallUpdate(update.toolCallId, update, undefined),
+          ...this.handleToolCallUpdate(update.toolCallId, toolCall, undefined),
         ];
-      case "tool_call_update":
+      }
+      case "tool_call_update": {
+        const toolCallUpdate: ToolCallUpdate = update;
         return [
           ...pendingUserEvents,
           ...this.handleToolCallUpdate(
             update.toolCallId,
-            update,
+            toolCallUpdate,
             this.toolCalls.get(update.toolCallId),
           ),
         ];
+      }
       case "plan":
         this.fallbackAssistantMessageId = null;
         return [...pendingUserEvents, this.wrapTimeline(mapPlanToTimeline(update))];
@@ -3552,9 +3637,13 @@ function findSelectConfigChoice({
 
 function flattenSelectOptions(options: SelectConfigOption["options"]): SelectConfigChoice[] {
   const flattened: SelectConfigChoice[] = [];
-  for (const option of options) {
+  // scriptc narrows with `in` only over an array of the element union, not a union of arrays.
+  const entries: Array<SessionConfigSelectOption | SessionConfigSelectGroup> = options;
+  for (const option of entries) {
     if ("value" in option) {
-      flattened.push(option);
+      // Through a local of the narrowed type: scriptc keeps the element's other arms otherwise.
+      const choice: SessionConfigSelectOption = option;
+      flattened.push(choice);
       continue;
     }
     for (const groupOption of option.options) {
@@ -4195,7 +4284,7 @@ function coerceSessionConfigMetadata(
 async function terminateChildProcess(
   child: ChildProcessWithoutNullStreams,
   timeoutMs: number,
-  terminate: ProcessTerminator,
+  terminate: ChildProcessTerminator,
 ): Promise<void> {
   try {
     await terminate(child, { gracefulTimeoutMs: timeoutMs, forceTimeoutMs: timeoutMs });

@@ -8,6 +8,11 @@ import type {
 } from "@getpaseo/protocol/messages";
 import { type CollectionRead, VersionedCollection } from "./internal/versioned-collection.js";
 
+// Named interfaces as type arguments: scriptc cannot instantiate a generic class with the
+// protocol's z.infer type aliases directly.
+interface ProjectDirectoryEntry extends WorkspaceProjectDescriptorPayload {}
+interface WorkspaceDirectoryEntry extends WorkspaceDescriptorPayload {}
+
 interface AgentDirectoryEntry {
   agent: AgentSnapshotPayload;
   project: ProjectPlacementPayload;
@@ -24,6 +29,10 @@ interface DirectoryVersion {
 }
 
 type ProjectUpdate = Extract<SessionOutboundMessage, { type: "project.update" }>;
+type WorkspaceUpdatePayload = Extract<
+  SessionOutboundMessage,
+  { type: "workspace_update" }
+>["payload"];
 type ProjectListResponse = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -40,10 +49,10 @@ type FetchAgentsResponse = Extract<
 /** Daemon-global latest-state sequence owner for the active app directory. */
 export class DirectorySyncService {
   private readonly generation: string;
-  private readonly projects = new VersionedCollection<WorkspaceProjectDescriptorPayload>({
+  private readonly projects = new VersionedCollection<ProjectDirectoryEntry>({
     getId: (project) => project.projectId,
   });
-  private readonly workspaces = new VersionedCollection<WorkspaceDescriptorPayload>({
+  private readonly workspaces = new VersionedCollection<WorkspaceDirectoryEntry>({
     getId: (workspace) => workspace.id,
   });
   private readonly agents = new VersionedCollection<AgentDirectoryEntry>({
@@ -55,7 +64,7 @@ export class DirectorySyncService {
   }
 
   synchronizeProjects(
-    snapshot: Iterable<WorkspaceProjectDescriptorPayload>,
+    snapshot: readonly WorkspaceProjectDescriptorPayload[],
     cursor: DirectorySyncCursor,
   ): Pick<ProjectListResponse, "projects" | "sync"> {
     this.projects.replaceAll(snapshot);
@@ -67,7 +76,7 @@ export class DirectorySyncService {
   }
 
   synchronizeWorkspaces(
-    snapshot: Iterable<WorkspaceDescriptorPayload>,
+    snapshot: readonly WorkspaceDescriptorPayload[],
     cursor: DirectorySyncCursor,
     includeBackground = false,
   ): Pick<FetchWorkspacesResponse, "entries" | "emptyProjects" | "pageInfo" | "sync"> {
@@ -82,7 +91,7 @@ export class DirectorySyncService {
   }
 
   synchronizeAgents(
-    snapshot: Iterable<AgentDirectoryEntry>,
+    snapshot: readonly AgentDirectoryEntry[],
     cursor: DirectorySyncCursor,
     includeBackground = false,
   ): Pick<FetchAgentsResponse, "entries" | "pageInfo" | "sync"> {
@@ -108,24 +117,25 @@ export class DirectorySyncService {
     return this.withVersion(update, includeSequence, this.version(this.projects, id));
   }
 
-  sequenceWorkspaceUpdate<T extends object>(
-    payload: T,
+  sequenceWorkspaceUpdate(
+    payload: WorkspaceUpdatePayload,
     value: WorkspaceDescriptorPayload | null,
     id: string,
     includeSequence: boolean,
     includeBackground = false,
-  ): T & Partial<DirectoryVersion> {
+  ): WorkspaceUpdatePayload {
     if (value) {
       this.workspaces.replace(value);
     } else {
       this.workspaces.remove(id);
     }
-    return this.withVersion(
-      payload,
-      includeSequence,
-      this.version(this.workspaces, id),
-      includeBackground,
-    );
+    const version = this.version(this.workspaces, id);
+    if (!version || !includeSequence) return payload;
+    // Not through the generic withVersion: scriptc cannot lower its intersection return
+    // type. One spread per arm so each spreads a single record type.
+    const generation = this.generationFor(includeBackground);
+    if (payload.kind === "upsert") return { ...payload, ...version, generation };
+    return { ...payload, ...version, generation };
   }
 
   sequenceAgentUpdate<T extends object>(

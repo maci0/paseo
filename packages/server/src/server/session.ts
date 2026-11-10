@@ -370,7 +370,11 @@ function agentDirectorySearchQuery(request: AgentDirectoryRequestMessage): strin
   return request.search?.trim() ?? "";
 }
 type FetchAgentsRequestFilter = NonNullable<FetchAgentsRequestMessage["filter"]>;
-type FetchAgentsRequestSort = NonNullable<FetchAgentsRequestMessage["sort"]>[number];
+// Sort keys come from the local tuple: scriptc resolves the protocol-derived key type to any.
+type FetchAgentsSortKey = (typeof FETCH_AGENTS_SORT_KEYS)[number];
+// A named interface as type argument: scriptc cannot instantiate a generic class with the
+// protocol's z.infer type alias directly.
+interface PagedAgent extends AgentSnapshotPayload {}
 type FetchAgentsResponsePayload = Extract<
   SessionOutboundMessage,
   { type: "fetch_agents_response" }
@@ -406,6 +410,14 @@ type WorkspaceUpdatePayload = Extract<
   SessionOutboundMessage,
   { type: "workspace_update" }
 >["payload"];
+type PluginCatalogEntry = Extract<
+  SessionOutboundMessage,
+  { type: "plugin.catalog.get.response" }
+>["payload"]["plugins"][number];
+type ProviderSubagentTimelineResponseRow = Extract<
+  SessionOutboundMessage,
+  { type: "agent.provider_subagents.timeline.get.response" }
+>["payload"]["rows"][number];
 interface WorkspaceUpdatesSubscriptionState {
   subscriptionId: string;
   owner: OwnedSubscription;
@@ -440,6 +452,52 @@ const nodeSessionFileSystem: SessionFileSystem = {
 
 // Stub types for features under development (modules not yet available)
 type AgentMcpTransportFactory = () => Promise<unknown>;
+
+// An interface over PluginLifecycle's methods: scriptc cannot call the generic `before` through
+// a property typed as PluginLifecycle["before"].
+export interface SessionPluginRuntime extends Pick<
+  import("./plugins/lifecycle/index.js").PluginLifecycle,
+  "wait" | "before" | "emit"
+> {
+  listPlugins(): Promise<import("@getpaseo/protocol/messages").PluginListItem[]>;
+  getLogs(pluginId: string): import("@getpaseo/protocol/messages").PluginLogEntry[];
+  installDirectory(input: {
+    path: string;
+    id?: string;
+  }): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
+  inspectDirectory(path: string): Promise<{ id: string }>;
+  installSource(input: {
+    source: string;
+    id?: string;
+    ref?: string;
+  }): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
+  statusSources(
+    pluginId?: string,
+  ): Promise<import("@getpaseo/protocol/messages").PluginSourceStatusItem[]>;
+  previewUpdates(input: {
+    pluginId?: string;
+    target?: import("@getpaseo/protocol/messages").PluginUpdateSelection;
+  }): Promise<import("@getpaseo/protocol/messages").PluginUpdatePreview[]>;
+  applyUpdates(
+    proposals: import("@getpaseo/protocol/messages").PluginUpdateProposal[],
+  ): Promise<import("@getpaseo/protocol/messages").PluginUpdateResult[]>;
+  updateSources(
+    pluginId?: string,
+  ): Promise<import("@getpaseo/protocol/messages").PluginSourceUpdateItem[]>;
+  reloadPlugin(pluginId: string): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
+  enablePlugin(pluginId: string): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
+  disablePlugin(pluginId: string): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
+  removePlugin(pluginId: string): Promise<void>;
+  subscribe(listener: (pluginId: string) => void): () => void;
+  subscribeSettings?(listener: (pluginId: string, settingsId: string) => void): () => void;
+  catalog(): Array<{ id: string; clientBundle: string; clientBundleHash?: string }>;
+  invokePluginRpc(pluginId: string, method: string, input: unknown): Promise<unknown>;
+  listUsageReports(options?: {
+    forceRefresh?: boolean;
+    reportIds?: string[];
+  }): Promise<UsageReportEntry[]>;
+  listLegacyUsage(): Promise<{ fetchedAt: string; providers: ProviderUsage[] }>;
+}
 
 export interface SessionOptions {
   connectedHosts?: ConnectedHosts;
@@ -485,49 +543,7 @@ export interface SessionOptions {
   workspaceRuntimeStore: WorkspaceRuntimeStore;
   workspaceAutoName: WorkspaceAutoName;
   daemonConfigStore: DaemonConfigStore;
-  pluginRuntime?: {
-    wait: import("./plugins/lifecycle/index.js").PluginLifecycle["wait"];
-    before: import("./plugins/lifecycle/index.js").PluginLifecycle["before"];
-    emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
-    listPlugins(): Promise<import("@getpaseo/protocol/messages").PluginListItem[]>;
-    getLogs(pluginId: string): import("@getpaseo/protocol/messages").PluginLogEntry[];
-    installDirectory(input: {
-      path: string;
-      id?: string;
-    }): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
-    inspectDirectory(path: string): Promise<{ id: string }>;
-    installSource(input: {
-      source: string;
-      id?: string;
-      ref?: string;
-    }): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
-    statusSources(
-      pluginId?: string,
-    ): Promise<import("@getpaseo/protocol/messages").PluginSourceStatusItem[]>;
-    previewUpdates(input: {
-      pluginId?: string;
-      target?: import("@getpaseo/protocol/messages").PluginUpdateSelection;
-    }): Promise<import("@getpaseo/protocol/messages").PluginUpdatePreview[]>;
-    applyUpdates(
-      proposals: import("@getpaseo/protocol/messages").PluginUpdateProposal[],
-    ): Promise<import("@getpaseo/protocol/messages").PluginUpdateResult[]>;
-    updateSources(
-      pluginId?: string,
-    ): Promise<import("@getpaseo/protocol/messages").PluginSourceUpdateItem[]>;
-    reloadPlugin(pluginId: string): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
-    enablePlugin(pluginId: string): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
-    disablePlugin(pluginId: string): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
-    removePlugin(pluginId: string): Promise<void>;
-    subscribe(listener: (pluginId: string) => void): () => void;
-    subscribeSettings?(listener: (pluginId: string, settingsId: string) => void): () => void;
-    catalog(): Array<{ id: string; clientBundle: string; clientBundleHash?: string }>;
-    invokePluginRpc(pluginId: string, method: string, input: unknown): Promise<unknown>;
-    listUsageReports(options?: {
-      forceRefresh?: boolean;
-      reportIds?: string[];
-    }): Promise<UsageReportEntry[]>;
-    listLegacyUsage(): Promise<{ fetchedAt: string; providers: ProviderUsage[] }>;
-  };
+  pluginRuntime?: SessionPluginRuntime;
   orchestrationSkills?: import("./orchestration-skills/index.js").OrchestrationSkills;
   mcpBaseUrl?: string | null;
   stt: Resolvable<SpeechToTextProvider | null>;
@@ -594,10 +610,14 @@ function parseClientCapabilities(
   if (!capabilities) {
     return new Set();
   }
-  const known = new Set<ClientCapability>(Object.values(CLIENT_CAPS));
+  // Filled by a loop: scriptc cannot convert Object.values() into a Set constructor argument.
+  const known = new Set<string>();
+  for (const capability of Object.values(CLIENT_CAPS)) {
+    known.add(capability);
+  }
   const result: ClientCapability[] = [];
   for (const [key, value] of Object.entries(capabilities)) {
-    if (value === true && known.has(key as ClientCapability)) {
+    if (value === true && known.has(key)) {
       result.push(key as ClientCapability);
     }
   }
@@ -1188,10 +1208,10 @@ export class Session {
       emit: (message) => this.emit(message),
       emitAgentRemove: (agentId) => this.agentUpdates.removeAgent(agentId),
       emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
-        this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
+        this.emitWorkspaceUpdatesForWorkspaceIds([...workspaceIds]),
       markWorkspaceArchiving: (workspaceIds, archivingAt) =>
-        this.markWorkspaceArchiving(workspaceIds, archivingAt),
-      clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+        this.markWorkspaceArchiving([...workspaceIds], archivingAt),
+      clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving([...workspaceIds]),
       killTerminalsForWorkspace: (workspaceId) =>
         this.terminalController.killTerminalsForWorkspace(workspaceId),
       logger: this.sessionLogger,
@@ -1504,15 +1524,15 @@ export class Session {
     workspaceIds: Iterable<string>,
     archivingAt: string,
   ): void {
-    this.markWorkspaceArchiving(workspaceIds, archivingAt);
+    this.markWorkspaceArchiving([...workspaceIds], archivingAt);
   }
 
   clearWorkspaceArchivingForExternalMutation(workspaceIds: Iterable<string>): void {
-    this.clearWorkspaceArchiving(workspaceIds);
+    this.clearWorkspaceArchiving([...workspaceIds]);
   }
 
   async emitWorkspaceUpdatesForExternalWorkspaceIds(workspaceIds: Iterable<string>): Promise<void> {
-    await this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds);
+    await this.emitWorkspaceUpdatesForWorkspaceIds([...workspaceIds]);
   }
 
   async syncWorkspaceGitObserversForExternalWorkspaceIds(
@@ -1819,7 +1839,7 @@ export class Session {
     )
       return;
     const descriptorsByWorkspaceId = await this.buildWorkspaceDescriptorMap({
-      workspaceIds: [mutation.workspaceId],
+      workspaceIds: new Set([mutation.workspaceId]),
       includeGitData: false,
     });
     const descriptor = descriptorsByWorkspaceId.get(mutation.workspaceId);
@@ -2386,7 +2406,9 @@ export class Session {
     let initial: WorkspaceSetupSnapshot | null = null;
     await handleWorkspaceSetupStatusRequestMessage(
       {
-        workspaceSetupSnapshots: this.workspaceSetupObservation,
+        workspaceSetupSnapshots: {
+          get: (workspaceId) => this.workspaceSetupObservation.get(workspaceId),
+        },
         getWorkspace: (id) => this.workspaceRegistry.get(id),
         emit: (message) => {
           if (message.type === "workspace_setup_status_response")
@@ -2548,6 +2570,22 @@ export class Session {
     }
   }
 
+  // A loop with a spread: scriptc has no Object.assign lowering, and lint rejects spreads in map.
+  private buildPluginCatalog(cached: ReadonlyMap<string, string>): PluginCatalogEntry[] {
+    const plugins: PluginCatalogEntry[] = [];
+    for (const { clientBundle, ...plugin } of this.pluginRuntime?.catalog() ?? []) {
+      if (
+        plugin.clientBundleHash !== undefined &&
+        cached.get(plugin.id) === plugin.clientBundleHash
+      ) {
+        plugins.push(plugin);
+      } else {
+        plugins.push({ ...plugin, clientBundle });
+      }
+    }
+    return plugins;
+  }
+
   private dispatchPluginMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     if (msg.type === "plugin.list.request") {
       return (this.pluginRuntime?.listPlugins() ?? Promise.resolve([])).then((plugins) => {
@@ -2608,17 +2646,14 @@ export class Session {
       });
     }
     if (msg.type === "plugin.catalog.get.request") {
-      const cached = new Map(
-        msg.cachedClientBundles?.map((entry) => [entry.id, entry.clientBundleHash]),
-      );
-      const plugins = (this.pluginRuntime?.catalog() ?? []).map(({ clientBundle, ...plugin }) =>
-        plugin.clientBundleHash !== undefined && cached.get(plugin.id) === plugin.clientBundleHash
-          ? plugin
-          : Object.assign(plugin, { clientBundle }),
-      );
+      // Filled by a loop: scriptc types a Map built from mapped entries as Map<unknown, unknown>.
+      const cached = new Map<string, string>();
+      for (const entry of msg.cachedClientBundles ?? []) {
+        cached.set(entry.id, entry.clientBundleHash);
+      }
       this.emit({
         type: "plugin.catalog.get.response",
-        payload: { requestId: msg.requestId, plugins },
+        payload: { requestId: msg.requestId, plugins: this.buildPluginCatalog(cached) },
       });
       return undefined;
     }
@@ -3458,7 +3493,7 @@ export class Session {
         }
       }
 
-      await this.emitWorkspaceUpdatesForWorkspaceIds(affectedWorkspaceIds);
+      await this.emitWorkspaceUpdatesForWorkspaceIds([...affectedWorkspaceIds]);
 
       this.emit({
         type: "agent.detach.response",
@@ -3485,9 +3520,11 @@ export class Session {
   }
 
   private async handleCloseItemsRequest(msg: CloseItemsRequest): Promise<void> {
-    const archiveResults = await Promise.allSettled(
-      msg.agentIds.map((agentId) => this.archiveAgentForClose(agentId)),
+    // A typed Promise<T>[]: scriptc's Promise.allSettled takes only an array of promises.
+    const archives: Promise<{ agentId: string; archivedAt: string }>[] = msg.agentIds.map(
+      (agentId) => this.archiveAgentForClose(agentId),
     );
+    const archiveResults = await Promise.allSettled(archives);
     const agents = [];
     for (let i = 0; i < archiveResults.length; i += 1) {
       const result = archiveResults[i];
@@ -5301,10 +5338,10 @@ export class Session {
         archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
         emit: (message) => this.emit(message),
         emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
-          this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
+          this.emitWorkspaceUpdatesForWorkspaceIds([...workspaceIds]),
         markWorkspaceArchiving: (workspaceIds, archivingAt) =>
-          this.markWorkspaceArchiving(workspaceIds, archivingAt),
-        clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+          this.markWorkspaceArchiving([...workspaceIds], archivingAt),
+        clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving([...workspaceIds]),
         killTerminalsForWorkspace: (workspaceId) =>
           this.terminalController.killTerminalsForWorkspace(workspaceId),
         sessionLogger: this.sessionLogger,
@@ -5635,10 +5672,7 @@ export class Session {
     };
   }
 
-  private readonly agentsPager = new SortablePager<
-    AgentSnapshotPayload,
-    FetchAgentsRequestSort["key"]
-  >({
+  private readonly agentsPager = new SortablePager<PagedAgent, FetchAgentsSortKey>({
     validKeys: FETCH_AGENTS_SORT_KEYS,
     defaultSort: [{ key: "updated_at", direction: "desc" }],
     label: "fetch_agents",
@@ -5662,7 +5696,7 @@ export class Session {
     },
   });
 
-  private decodeAgentCursor(token: string, sort: SortSpec<FetchAgentsRequestSort["key"]>[]) {
+  private decodeAgentCursor(token: string, sort: SortSpec<FetchAgentsSortKey>[]) {
     try {
       return this.agentsPager.decode(token, sort);
     } catch (error) {
@@ -5839,17 +5873,17 @@ export class Session {
     return this.describeWorkspaceRecord(input.workspace, input.projectRecord);
   }
 
-  markWorkspaceArchiving(workspaceIds: Iterable<string>, archivingAt: string): void {
+  markWorkspaceArchiving(workspaceIds: readonly string[], archivingAt: string): void {
     this.workspaceDirectory.markArchiving(workspaceIds, archivingAt);
   }
 
-  clearWorkspaceArchiving(workspaceIds: Iterable<string>): void {
+  clearWorkspaceArchiving(workspaceIds: readonly string[]): void {
     this.workspaceDirectory.clearArchiving(workspaceIds);
   }
 
   private async buildWorkspaceDescriptorMap(options: {
     includeGitData: boolean;
-    workspaceIds?: Iterable<string>;
+    workspaceIds?: ReadonlySet<string>;
   }): Promise<Map<string, WorkspaceDescriptorPayload>> {
     return this.workspaceDirectory.buildDescriptorMap(options);
   }
@@ -6101,7 +6135,7 @@ export class Session {
   }
 
   private async emitWorkspaceUpdatesForWorkspaceIds(
-    workspaceIds: Iterable<string>,
+    workspaceIds: readonly string[],
     options?: WorkspaceUpdateOptions,
   ): Promise<void> {
     const uniqueWorkspaceIds = new Set(workspaceIds);
@@ -7525,7 +7559,9 @@ export class Session {
     return handleWorkspaceSetupStatusRequestMessage(
       {
         emit: (message) => this.emit(message),
-        workspaceSetupSnapshots: this.workspaceSetupObservation,
+        workspaceSetupSnapshots: {
+          get: (workspaceId) => this.workspaceSetupObservation.get(workspaceId),
+        },
         getWorkspace: (workspaceId) => this.workspaceRegistry.get(workspaceId),
       },
       request,
@@ -7585,10 +7621,11 @@ export class Session {
           listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
           archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
           emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
-            this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
+            this.emitWorkspaceUpdatesForWorkspaceIds([...workspaceIds]),
           markWorkspaceArchiving: (workspaceIds, archivingAt) =>
-            this.markWorkspaceArchiving(workspaceIds, archivingAt),
-          clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+            this.markWorkspaceArchiving([...workspaceIds], archivingAt),
+          clearWorkspaceArchiving: (workspaceIds) =>
+            this.clearWorkspaceArchiving([...workspaceIds]),
           assertWorkspaceAutomationAllowed: (workspaceId) =>
             assertWorkspaceAutomationAllowedForWorkspace(this.workspaceRegistry, workspaceId),
           killTerminalsForWorkspace: (workspaceId) =>
@@ -8161,6 +8198,29 @@ export class Session {
         },
       );
       const rows = timeline.rows.filter((row) => this.supportsTimelineItem(row.item, source));
+      // Built per branch into the wire row type: scriptc types a ternary by its first arm.
+      let responseRows: ProviderSubagentTimelineResponseRow[];
+      if (supportsProjection) {
+        responseRows = rows.map((row) => ({
+          item: row.item,
+          timestamp: row.timestamp,
+          seq: row.seqEnd,
+          seqStart: row.seqStart,
+          seqEnd: row.seqEnd,
+          sourceSeqRanges: row.sourceSeqRanges,
+        }));
+      } else {
+        responseRows = [
+          {
+            seq: timeline.window.maxSeq,
+            timestamp: new Date().toISOString(),
+            item: {
+              type: "assistant_message",
+              text: "Please upgrade the Paseo app to view this subagent conversation.",
+            },
+          },
+        ];
+      }
       this.emitForSource(
         {
           type: "agent.provider_subagents.timeline.get.response",
@@ -8182,25 +8242,7 @@ export class Session {
             window: timeline.window,
             hasOlder: supportsProjection && timeline.hasOlder,
             hasNewer: supportsProjection && timeline.hasNewer,
-            rows: supportsProjection
-              ? rows.map((row) => ({
-                  item: row.item,
-                  timestamp: row.timestamp,
-                  seq: row.seqEnd,
-                  seqStart: row.seqStart,
-                  seqEnd: row.seqEnd,
-                  sourceSeqRanges: row.sourceSeqRanges,
-                }))
-              : [
-                  {
-                    seq: timeline.window.maxSeq,
-                    timestamp: new Date().toISOString(),
-                    item: {
-                      type: "assistant_message",
-                      text: "Please upgrade the Paseo app to view this subagent conversation.",
-                    },
-                  },
-                ],
+            rows: responseRows,
             error: null,
           },
         },

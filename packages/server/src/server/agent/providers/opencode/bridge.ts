@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,6 +16,31 @@ import { PaseoToolInputError, type PaseoToolCatalog } from "../../tools/types.js
 
 const INTERNAL_PREFIX = "/_internal/opencode";
 const MAX_REQUEST_BYTES = 1024 * 1024;
+
+// The esbuild surface compileOpenCodeBridgePlugin uses. Its own types cannot be imported: scriptc
+// refuses any reference to the package, whose implementation is not in a native build.
+interface EsbuildPackage {
+  build(options: {
+    stdin: { contents: string; resolveDir: string; sourcefile: string };
+    bundle: boolean;
+    format: "esm";
+    platform: "neutral";
+    mainFields: string[];
+    target: string;
+    write: false;
+  }): Promise<{ outputFiles: Array<{ contents: Uint8Array }> }>;
+}
+
+const require = createRequire(import.meta.url);
+
+// Base URL for the bundled bridge plugin files. In a scriptc binary (process.argv[0]
+// "scriptc") import.meta.url is the source path on the build machine, so the files ship
+// beside the executable in opencode/ (bridge-plugin.bundle.mjs, v2/bridge-plugin.bundle.mjs,
+// v2/state.mjs). bridge.js itself is not there; only URLs relative to it are read.
+const BRIDGE_FILES_URL =
+  process.argv[0] === "scriptc"
+    ? pathToFileURL(path.join(path.dirname(process.execPath), "opencode", "bridge.js")).href
+    : import.meta.url;
 
 class OpenCodeBridgeClientError extends Error {
   constructor(
@@ -151,7 +177,7 @@ export class OpenCodeBridge {
 
   private async materializePlugin(version: 1 | 2 = 1): Promise<string> {
     if (version === 2) return materializeOpenCodeV2Plugin(this.paseoHome);
-    const artifact = await loadOpenCodeBridgePluginArtifact(import.meta.url);
+    const artifact = await loadOpenCodeBridgePluginArtifact(BRIDGE_FILES_URL);
     const digest = createHash("sha256").update(artifact).digest("hex");
     const destination = path.join(this.paseoHome, "runtime", "opencode", `paseo-${digest}.mjs`);
     await writeFileAtomic(destination, artifact);
@@ -223,7 +249,9 @@ export class OpenCodeBridge {
           sendJson(response, 500, { error: failure.message });
         }
       } else {
-        response.destroy(failure);
+        // scriptc's ServerResponse.destroy takes no error. Nothing here observes the error the
+        // socket would emit (no clientError listener), so the connection closes the same way.
+        response.destroy();
       }
     }
   }
@@ -283,12 +311,12 @@ export class OpenCodeBridge {
 }
 
 export async function materializeOpenCodeV2Plugin(paseoHome: string): Promise<string> {
-  const artifact = await loadOpenCodeBridgePluginArtifact(import.meta.url, undefined, 2);
+  const artifact = await loadOpenCodeBridgePluginArtifact(BRIDGE_FILES_URL, undefined, 2);
   const digest = createHash("sha256").update(artifact).digest("hex");
   // V2 ignores configured file paths; it loads a package directory's server entry point.
   const directory = path.join(paseoHome, "runtime", "opencode", `paseo-v2-${digest}`);
   await writeFileAtomic(path.join(directory, "server.js"), artifact);
-  const state = await readFile(new URL("./v2/state.mjs", import.meta.url));
+  const state = await readFile(new URL("./v2/state.mjs", BRIDGE_FILES_URL));
   await writeFileAtomic(path.join(directory, "state.mjs"), state);
   await writeFileAtomic(
     path.join(directory, "package.json"),
@@ -353,7 +381,11 @@ export async function loadOpenCodeBridgePluginArtifact(
 
 async function compileOpenCodeBridgePlugin(sourcePath: string): Promise<Uint8Array> {
   const source = await readFile(sourcePath, "utf8");
-  const { build } = await import("esbuild");
+  // A scriptc binary (argv[0] "scriptc") would exit on loading a package outside its program.
+  if (process.argv[0] === "scriptc") {
+    throw new Error("Compiling the OpenCode bridge plugin is not supported in the native build");
+  }
+  const { build } = loadEsbuild(require);
   const bundled = await build({
     stdin: {
       contents: source,
@@ -372,6 +404,13 @@ async function compileOpenCodeBridgePlugin(sourcePath: string): Promise<Uint8Arr
   return artifact;
 }
 
+// scriptc cannot compile a literal import() of a package outside its program, nor a require with a
+// computed specifier in TypeScript; a createRequire loader passed in as a value resolves at run time.
+function loadEsbuild(load: NodeJS.Require): EsbuildPackage {
+  const loaded: EsbuildPackage = load("esbuild");
+  return loaded;
+}
+
 function parseOpenCodeConfig(value: string | undefined): OpenCodeConfig {
   if (!value?.trim()) return {};
   const parsed: unknown = JSON.parse(value);
@@ -383,14 +422,21 @@ function parseOpenCodeConfig(value: string | undefined): OpenCodeConfig {
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.byteLength;
-    if (size > MAX_REQUEST_BYTES) {
-      throw new OpenCodeBridgeClientError(413, "OpenCode bridge request body is too large");
+  if (process.argv[0] === "scriptc") {
+    chunks.push(...(await readRequestChunksFromEvents(request)));
+  } else {
+    let size = 0;
+    // scriptc compiles for-await over an IncomingMessage only through a binding typed as an
+    // async iterable, and a native IncomingMessage is not one, so only Node takes this branch.
+    const source: AsyncIterable<Buffer | string> = request;
+    for await (const chunk of source) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.byteLength;
+      if (size > MAX_REQUEST_BYTES) {
+        throw new OpenCodeBridgeClientError(413, "OpenCode bridge request body is too large");
+      }
+      chunks.push(buffer);
     }
-    chunks.push(buffer);
   }
   if (chunks.length === 0) return {};
   try {
@@ -398,6 +444,42 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   } catch {
     throw new OpenCodeBridgeClientError(400, "Malformed JSON request body");
   }
+}
+
+// Native build only: the body through 'data' events, with the same size limit; an oversized
+// body destroys the request, as leaving the for-await loop above does.
+function readRequestChunksFromEvents(request: IncomingMessage): Promise<Buffer[]> {
+  return new Promise<Buffer[]>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    request.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      size += chunk.byteLength;
+      if (size > MAX_REQUEST_BYTES) {
+        settled = true;
+        request.destroy();
+        reject(new OpenCodeBridgeClientError(413, "OpenCode bridge request body is too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.once("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(chunks);
+    });
+    request.once("error", (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    request.once("close", () => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("Premature close"));
+    });
+  });
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {

@@ -48,6 +48,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// scriptc lowers only top-level generic functions, so the queue state is passed in.
+interface OperationQueue {
+  tail: Promise<unknown>;
+}
+function serialize<T>(queue: OperationQueue, run: () => Promise<T>): Promise<T> {
+  const next = queue.tail.then(run, run);
+  queue.tail = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 /**
  * The single writer for installed skills. Startup convergence and every settings
  * command run through one queue, so no operation applies a plan computed from a
@@ -64,16 +77,7 @@ export function createSkillsController({
   resolveTargets: () => SkillTargets;
   selectionStore: SkillSelectionStore;
 }): SkillsController {
-  let queue: Promise<unknown> = Promise.resolve();
-
-  function serialize<T>(run: () => Promise<T>): Promise<T> {
-    const next = queue.then(run, run);
-    queue = next.then(
-      () => undefined,
-      () => undefined,
-    );
-    return next;
-  }
+  const queue: OperationQueue = { tail: Promise.resolve() };
 
   async function converge(apply: Converge): Promise<SkillsSnapshot> {
     const selection = await selectionStore.get();
@@ -159,13 +163,13 @@ export function createSkillsController({
   }
 
   return {
-    status: () => serialize(() => converge(getSkillsStatus)),
-    install: () => serialize(() => converge(updateSkills)),
-    update: () => serialize(() => converge(updateSkills)),
-    uninstall: () => serialize(() => converge(uninstallSkills)),
-    autoUpdate: () => serialize(() => converge(autoUpdateInstalledSkills)),
-    save: (selection) => serialize(() => saveSelection(selection)),
+    status: () => serialize(queue, () => converge(getSkillsStatus)),
+    install: () => serialize(queue, () => converge(updateSkills)),
+    update: () => serialize(queue, () => converge(updateSkills)),
+    uninstall: () => serialize(queue, () => converge(uninstallSkills)),
+    autoUpdate: () => serialize(queue, () => converge(autoUpdateInstalledSkills)),
+    save: (selection) => serialize(queue, () => saveSelection(selection)),
     importLegacySelectionIfUnset: (selection) =>
-      serialize(() => importLegacySelectionIfUnset(selection)),
+      serialize(queue, () => importLegacySelectionIfUnset(selection)),
   };
 }

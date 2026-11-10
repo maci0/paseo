@@ -3,10 +3,7 @@ import path from "node:path";
 
 import type { Logger } from "pino";
 
-import type {
-  TurnDetectionProvider,
-  TurnDetectionSession,
-} from "../../../turn-detection-provider.js";
+import type { TurnDetectionProvider } from "../../../turn-detection-provider.js";
 import {
   resolveBundledSileroVadModelPath,
   SherpaSileroVadSession,
@@ -54,7 +51,8 @@ export class SherpaSileroTurnDetectionProvider implements TurnDetectionProvider 
     });
   }
 
-  createSession(params: { logger: Logger }): TurnDetectionSession {
+  // Returns the class, not TurnDetectionSession: see trackTurnDetectionSession in worker-process.ts.
+  createSession(params: { logger: Logger }): SherpaSileroVadSession {
     this.logger.debug(
       { sampleRate: this.config.sampleRate, modelPath: this.config.modelPath },
       "Creating Silero VAD turn-detection session",

@@ -1,25 +1,32 @@
 // Derived from cprecioso/paseo-worktreeinclude (MIT); see ./LICENSE in the plugin root.
 // Copyright (c) 2026 Carlos Precioso.
-import { execFile } from "node:child_process";
+import { type ExecFileException, execFile } from "node:child_process";
 import { constants, existsSync } from "node:fs";
 import { copyFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 
-const exec = promisify(execFile);
 const INCLUDE_FILE = ".worktreeinclude";
 
 export type CopyResult =
   | { kind: "no-include-file" }
   | { kind: "copied"; copied: string[]; skipped: string[] };
 
-async function git(cwd: string, args: string[], input?: string): Promise<string> {
-  const child = exec("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 });
-  if (input !== undefined) {
-    child.child.stdin?.end(input);
-  }
-  const { stdout } = await child;
-  return stdout;
+// The callback form of execFile: scriptc cannot lower promisify(execFile)'s PromiseWithChild.
+function git(cwd: string, args: string[], input?: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      "git",
+      args,
+      { cwd, maxBuffer: 64 * 1024 * 1024 },
+      (error: ExecFileException | null, stdout: string) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      },
+    );
+    if (input !== undefined) {
+      child.stdin?.end(input);
+    }
+  });
 }
 
 async function gitAllowExit1(cwd: string, args: string[], input: string): Promise<string> {

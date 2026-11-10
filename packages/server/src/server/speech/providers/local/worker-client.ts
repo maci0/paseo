@@ -1,8 +1,9 @@
-import { fork } from "node:child_process";
+import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
 import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
+import { URL, fileURLToPath } from "node:url";
 import type pino from "pino";
 
 import type {
@@ -23,7 +24,8 @@ import type {
   LocalSpeechWorkerResponse,
   LocalSpeechWorkerToParentMessage,
 } from "./worker-protocol.js";
-import { bufferToWorkerBytes, workerBytesToBuffer } from "./worker-bytes.js";
+import { toWorkerIpcMessage } from "./worker-protocol.js";
+import { bufferToWorkerBytes, workerBytesLength, workerBytesToBuffer } from "./worker-bytes.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 const DEFAULT_IDLE_TTL_MS = 5 * 60 * 1000;
@@ -91,15 +93,116 @@ function resolveWorkerExecArgv(): string[] {
   ];
 }
 
+interface NodeChildProcessModule {
+  fork(
+    modulePath: string,
+    args: string[],
+    options: {
+      env: NodeJS.ProcessEnv;
+      execArgv: string[];
+      serialization: "advanced";
+      stdio: ["ignore", "ignore", "pipe", "ipc"];
+    },
+  ): LocalSpeechWorkerProcess;
+}
+
+// scriptc refuses any fork() whose module path is computed at run time, even on a branch only
+// Node takes, so Node's fork comes through a createRequire loader held as a value: scriptc
+// resolves such a request when it runs, and only Node runs it.
+function requireNodeChildProcess(load: NodeRequire): NodeChildProcessModule {
+  return load("node:child_process") as NodeChildProcessModule;
+}
+
+const require = createRequire(import.meta.url);
+
+// A scriptc binary types a JSON value cast to LocalSpeechWorkerToParentMessage by the first arm
+// whose fields fit, which for a failed response is the `ok: true` arm; the failure arm is
+// rebuilt so `message.ok` narrows to the arm the value has.
+function decodeNativeParentMessage(raw: unknown): LocalSpeechWorkerToParentMessage {
+  const value = raw as { type: string; requestId?: string; ok?: boolean; error?: string };
+  if (value.type === "response" && value.ok === false) {
+    return {
+      type: "response",
+      requestId: value.requestId ?? "",
+      ok: false,
+      error: value.error ?? "Local speech worker request failed",
+    };
+  }
+  return raw as LocalSpeechWorkerToParentMessage;
+}
+
+// A scriptc binary cannot view a ChildProcess through LocalSpeechWorkerProcess, sends IPC
+// messages as JSON, and does not emit "close" for a forked child, so its worker is wrapped and
+// "close" listeners wait for "exit".
+class NativeLocalSpeechWorkerProcess implements LocalSpeechWorkerProcess {
+  readonly pid?: number;
+  readonly stderr: Readable | null;
+
+  constructor(private readonly child: ChildProcess) {
+    this.pid = child.pid;
+    this.stderr = child.stderr;
+  }
+
+  get connected(): boolean {
+    return this.child.connected;
+  }
+
+  get killed(): boolean {
+    return this.child.killed;
+  }
+
+  send(message: LocalSpeechWorkerRequest, callback: (error: Error | null) => void): boolean {
+    return this.child.send(toWorkerIpcMessage(message), callback);
+  }
+
+  disconnect(): void {
+    this.child.disconnect();
+  }
+
+  kill(): boolean {
+    return this.child.kill();
+  }
+
+  on(event: "message", listener: (message: LocalSpeechWorkerToParentMessage) => void): this;
+  on(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
+  // The implementation takes the listener as unknown: a scriptc binary cannot hold a union of
+  // two function types.
+  on(event: "message" | "close", listener: unknown): this {
+    if (event === "message") {
+      const onMessage = listener as (message: LocalSpeechWorkerToParentMessage) => void;
+      this.child.on("message", (raw: unknown) => onMessage(decodeNativeParentMessage(raw)));
+    } else {
+      const onExit = listener as (code: number | null, signal: NodeJS.Signals | null) => void;
+      this.child.on("exit", (code: number | null, signal: NodeJS.Signals | null) =>
+        onExit(code, signal),
+      );
+    }
+    return this;
+  }
+}
+
 function forkLocalSpeechWorker(): LocalSpeechWorkerProcess {
+  // A scriptc binary (process.argv[0] === "scriptc") embeds a fork target given as a static
+  // URL and re-executes itself to run it. That entry, packages/server/native/speech-worker.ts
+  // (native/sherpa/speech-worker.ts in the turbopaseo repo, copied beside the daemon's native
+  // entry), registers the FFI stand-in for sherpa-onnx-node before running worker-process.ts.
+  // The binary finds the sherpa libraries through its RUNPATH.
+  if (process.argv[0] === "scriptc") {
+    const child = fork(
+      fileURLToPath(new URL("../../../../../native/speech-worker.ts", import.meta.url)),
+      [],
+      { env: { ...process.env }, stdio: ["ignore", "ignore", "pipe", "ipc"] },
+    );
+    return new NativeLocalSpeechWorkerProcess(child);
+  }
   const env = { ...process.env };
   applySherpaLoaderEnv(env);
-  return fork(fileURLToPath(resolveWorkerUrl()), [], {
+  return requireNodeChildProcess(require).fork(fileURLToPath(resolveWorkerUrl()), [], {
     env,
     execArgv: resolveWorkerExecArgv(),
     serialization: "advanced",
     stdio: ["ignore", "ignore", "pipe", "ipc"],
-  }) as LocalSpeechWorkerProcess;
+  });
 }
 
 function isResponse(
@@ -120,7 +223,7 @@ function summarizeWorkerRequest(message: LocalSpeechWorkerRequest): Record<strin
     case "session.create":
       return { kind: message.kind, sessionId: message.sessionId };
     case "session.append":
-      return { sessionId: message.sessionId, audioBytes: message.audio.byteLength };
+      return { sessionId: message.sessionId, audioBytes: workerBytesLength(message.audio) };
     case "session.commit":
     case "session.clear":
     case "session.flush":
@@ -130,7 +233,7 @@ function summarizeWorkerRequest(message: LocalSpeechWorkerRequest): Record<strin
     case "stt.transcribe":
       return {
         model: message.model,
-        audioBytes: message.audio.byteLength,
+        audioBytes: workerBytesLength(message.audio),
         format: message.format,
       };
     case "tts.synthesize":
@@ -310,7 +413,7 @@ export class LocalSpeechWorkerClient {
     }
   }
 
-  private sendRequest<T = void>(input: LocalSpeechWorkerRequestInput): Promise<T> {
+  private sendRequest<T = unknown>(input: LocalSpeechWorkerRequestInput): Promise<T> {
     const worker = this.ensureWorker();
     const requestId = randomUUID();
     const message = { ...input, requestId } as LocalSpeechWorkerRequest;

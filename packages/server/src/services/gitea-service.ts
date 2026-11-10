@@ -59,7 +59,7 @@ import type {
   SearchIssuesAndPrsOptions,
   SearchResult,
 } from "./forge-service.js";
-import { isGiteaStatusFacts, type GiteaStatusFacts } from "./gitea-facts.js";
+import { isGiteaStatusFacts, type GiteaForgeSpecificStatusFacts } from "./gitea-facts.js";
 
 const TEA_ENV = {
   GIT_TERMINAL_PROMPT: "0",
@@ -1061,8 +1061,10 @@ function toIssueSummary(item: GiteaIssueListItem): IssueSummary {
   };
 }
 
-function toGiteaStatusFacts(item: GiteaPrListItem): GiteaStatusFacts {
+// Builds the envelope in one literal: scriptc cannot spread a record into an index-signature shape.
+function toGiteaForgeSpecificStatusFacts(item: GiteaPrListItem): GiteaForgeSpecificStatusFacts {
   return {
+    forge: "gitea",
     mergeable: parseGiteaBool(item.mergeable),
     hasMerged: mapGiteaState(item.state) === "merged",
     ciStatus: item.ci && item.ci.length > 0 ? item.ci : null,
@@ -1090,7 +1092,7 @@ function toCurrentPullRequestStatus(item: GiteaPrListItem): CurrentPullRequestSt
     // The whole Gitea family (gitea, forgejo, codeberg) tags its facts with the
     // family id "gitea" — they share one facts shape and one guard. This is the
     // facts-family tag, distinct from the workspace's brand-specific forge id.
-    forgeSpecific: { forge: "gitea", ...toGiteaStatusFacts(item) },
+    forgeSpecific: toGiteaForgeSpecificStatusFacts(item),
   };
 }
 
@@ -1387,6 +1389,71 @@ function throwFirstNonTeaAuthSearchRejection(results: PromiseSettledResult<unkno
   }
 }
 
+// Tea command runner bound to a service instance's resolved CLI path.
+type TeaRun = (args: string[], runOptions: TeaCommandRunnerOptions) => Promise<string>;
+
+// The generic JSON helpers live at top level: scriptc lowers only top-level generic functions.
+function runTeaJsonParse<T>(
+  args: string[],
+  runOptions: TeaCommandRunnerOptions,
+  stdout: string,
+  schema: z.ZodType<T>,
+): T {
+  return parseCliJsonOutput({
+    commandName: "tea",
+    args,
+    cwd: runOptions.cwd,
+    stdout,
+    schema,
+    createCommandError: (params) => new TeaCommandError(params),
+  });
+}
+
+async function runTeaJsonArray<T>(
+  run: TeaRun,
+  args: string[],
+  runOptions: TeaCommandRunnerOptions,
+  itemSchema: z.ZodType<T>,
+): Promise<T[]> {
+  const stdout = await run(args, runOptions);
+  if (!stdout) {
+    return [];
+  }
+  return runTeaJsonParse(args, runOptions, stdout, z.array(itemSchema));
+}
+
+async function runTeaJson<T>(
+  run: TeaRun,
+  args: string[],
+  runOptions: TeaCommandRunnerOptions,
+  schema: z.ZodType<T>,
+): Promise<T> {
+  const stdout = await run(args, runOptions);
+  return runTeaJsonParse(args, runOptions, stdout, schema);
+}
+
+async function listTeaTimelineBucketPages<T>(
+  run: TeaRun,
+  input: GetPullRequestTimelineOptions,
+  suffix: string,
+  itemSchema: z.ZodType<T>,
+): Promise<GiteaTimelineBucket<T>> {
+  const items: T[] = [];
+  for (let page = 1; page <= TIMELINE_MAX_PAGES_PER_BUCKET; page += 1) {
+    const pageItems = await runTeaJsonArray(
+      run,
+      ["api", timelineApiPath(input, `${suffix}?${timelinePageQuery(page)}`)],
+      { cwd: input.cwd },
+      itemSchema,
+    );
+    items.push(...pageItems);
+    if (pageItems.length < TIMELINE_PAGE_SIZE) {
+      return { items, truncated: false };
+    }
+  }
+  return { items, truncated: true };
+}
+
 export function createGiteaService(options: CreateGiteaServiceOptions = {}): ForgeService {
   const runner = options.runner ?? runTeaCommand;
   const resolveTea = createCachedCliPathResolver(options.resolveTeaPath ?? resolveTeaPath);
@@ -1406,43 +1473,6 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     } catch (error) {
       throw teaCliRunner.normalizeError(error, { args: redactTeaArgs(args), cwd: runOptions.cwd });
     }
-  }
-
-  function runJsonParse<T>(
-    args: string[],
-    runOptions: TeaCommandRunnerOptions,
-    stdout: string,
-    schema: z.ZodType<T>,
-  ): T {
-    return parseCliJsonOutput({
-      commandName: "tea",
-      args,
-      cwd: runOptions.cwd,
-      stdout,
-      schema,
-      createCommandError: (params) => new TeaCommandError(params),
-    });
-  }
-
-  async function runJsonArray<T>(
-    args: string[],
-    runOptions: TeaCommandRunnerOptions,
-    itemSchema: z.ZodType<T>,
-  ): Promise<T[]> {
-    const stdout = await run(args, runOptions);
-    if (!stdout) {
-      return [];
-    }
-    return runJsonParse(args, runOptions, stdout, z.array(itemSchema));
-  }
-
-  async function runJson<T>(
-    args: string[],
-    runOptions: TeaCommandRunnerOptions,
-    schema: z.ZodType<T>,
-  ): Promise<T> {
-    const stdout = await run(args, runOptions);
-    return runJsonParse(args, runOptions, stdout, schema);
   }
 
   function resolveHeadRefKind(
@@ -1477,7 +1507,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     if (!owner || !name) {
       return sameRepo;
     }
-    const pr = await runJson(
+    const pr = await runTeaJson(
+      run,
       [
         "api",
         `repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${summary.number}`,
@@ -1515,7 +1546,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     if (typeof input.page === "number") {
       args.push("--page", String(input.page));
     }
-    const items = await runJsonArray(args, { cwd: input.cwd }, GiteaPrListItemSchema);
+    const items = await runTeaJsonArray(run, args, { cwd: input.cwd }, GiteaPrListItemSchema);
     const query = input.query?.trim().toLowerCase();
     if (!query) {
       return items;
@@ -1532,7 +1563,7 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     if (typeof input.limit === "number") {
       args.push("--limit", String(input.limit));
     }
-    const items = await runJsonArray(args, { cwd: input.cwd }, GiteaIssueListItemSchema);
+    const items = await runTeaJsonArray(run, args, { cwd: input.cwd }, GiteaIssueListItemSchema);
     const query = input.query?.trim().toLowerCase();
     const filtered = query
       ? items.filter((item) => item.title.toLowerCase().includes(query))
@@ -1547,31 +1578,12 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     prNumber: number;
     reviewId: number;
   }): Promise<GiteaTimelineBucket<GiteaReviewComment>> {
-    return listTimelineBucketPages(
+    return listTeaTimelineBucketPages(
+      run,
       input,
       `pulls/${input.prNumber}/reviews/${input.reviewId}/comments`,
       GiteaReviewCommentSchema,
     );
-  }
-
-  async function listTimelineBucketPages<T>(
-    input: GetPullRequestTimelineOptions,
-    suffix: string,
-    itemSchema: z.ZodType<T>,
-  ): Promise<GiteaTimelineBucket<T>> {
-    const items: T[] = [];
-    for (let page = 1; page <= TIMELINE_MAX_PAGES_PER_BUCKET; page += 1) {
-      const pageItems = await runJsonArray(
-        ["api", timelineApiPath(input, `${suffix}?${timelinePageQuery(page)}`)],
-        { cwd: input.cwd },
-        itemSchema,
-      );
-      items.push(...pageItems);
-      if (pageItems.length < TIMELINE_PAGE_SIZE) {
-        return { items, truncated: false };
-      }
-    }
-    return { items, truncated: true };
   }
 
   async function loadCurrentPullRequestStatus(input: {
@@ -1620,7 +1632,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     const repoPath = repoIdentity
       ? `repos/${encodeURIComponent(repoIdentity.owner)}/${encodeURIComponent(repoIdentity.name)}`
       : "repos/{owner}/{repo}";
-    const recentItems = await runJsonArray(
+    const recentItems = await runTeaJsonArray(
+      run,
       [
         "api",
         `${repoPath}/pulls?state=all&sort=recentupdate&page=1&limit=${CURRENT_PR_LOOKUP_PAGE_SIZE}`,
@@ -1695,7 +1708,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       return status;
     }
     try {
-      const pr = await runJson(
+      const pr = await runTeaJson(
+        run,
         ["pr", String(number), "-o", "json"],
         { cwd },
         GiteaPullRequestViewSchema,
@@ -1747,7 +1761,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     const owner = encodeURIComponent(input.repoOwner);
     const repo = encodeURIComponent(input.repoName);
     const sha = encodeURIComponent(input.sha);
-    return runJson(
+    return runTeaJson(
+      run,
       ["api", `repos/${owner}/${repo}/commits/${sha}/status`],
       { cwd: input.cwd },
       GiteaCombinedCommitStatusSchema,
@@ -1851,7 +1866,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     let fetched = 0;
     for (let page = 1; page <= GITEA_ACTION_MAX_PAGES; page += 1) {
       const queryPrefix = query ? `${query}&` : "";
-      const response = await runJson(
+      const response = await runTeaJson(
+        run,
         [
           "api",
           `repos/${owner}/${repo}/actions/${endpoint}?${queryPrefix}limit=${GITEA_ACTION_PAGE_LIMIT}&page=${page}`,
@@ -1891,7 +1907,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     if (!match || number === null) {
       throw new Error(`Gitea pull request for branch ${headRef} was not found`);
     }
-    const pr = await runJson(
+    const pr = await runTeaJson(
+      run,
       ["pr", String(number), "-o", "json"],
       { cwd },
       GiteaPullRequestViewSchema,
@@ -1917,7 +1934,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     if (cached && cached.expiresAt > nowMs) {
       return cached.sha;
     }
-    const pr = await runJson(
+    const pr = await runTeaJson(
+      run,
       ["pr", String(number), "-o", "json"],
       { cwd },
       GiteaPullRequestViewSchema,
@@ -2010,7 +2028,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       // Fetch the single PR by number (like gh `pr view <n>` / glab MR view) so
       // PRs outside the recent-list window are reachable; tea errors surface as
       // a not-found rather than silently missing.
-      const view = await runJson(
+      const view = await runTeaJson(
+        run,
         ["pr", String(input.number), "-o", "json"],
         { cwd: input.cwd },
         GiteaPullRequestViewSchema,
@@ -2123,18 +2142,25 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
         repoName: input.repoName,
       };
       try {
-        const pr = await runJson(
+        const pr = await runTeaJson(
+          run,
           ["pr", String(input.prNumber), "-o", "json"],
           { cwd: input.cwd },
           GiteaPullRequestViewSchema,
         );
         const [commentsResult, reviewsResult] = await Promise.allSettled([
-          listTimelineBucketPages(
+          listTeaTimelineBucketPages(
+            run,
             input,
             `issues/${input.prNumber}/comments`,
             GiteaIssueCommentSchema,
           ),
-          listTimelineBucketPages(input, `pulls/${input.prNumber}/reviews`, GiteaReviewSchema),
+          listTeaTimelineBucketPages(
+            run,
+            input,
+            `pulls/${input.prNumber}/reviews`,
+            GiteaReviewSchema,
+          ),
         ]);
         if (commentsResult.status === "rejected" && reviewsResult.status === "rejected") {
           return {
@@ -2155,7 +2181,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
         const comments = commentsBucket.items;
         const reviews = reviewsBucket.items;
         const reviewsWithComments = reviews.filter((review) => review.comments_count > 0);
-        const reviewCommentResults = await Promise.allSettled(
+        // A typed Promise<T>[] local: scriptc lowers Promise.allSettled only over that shape.
+        const reviewCommentTasks: Promise<GiteaTimelineBucket<GiteaReviewComment>>[] =
           reviewsWithComments.map((review) =>
             reviewCommentsLimit(() =>
               listPullRequestReviewComments({
@@ -2166,8 +2193,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
                 reviewId: review.id,
               }),
             ),
-          ),
-        );
+          );
+        const reviewCommentResults = await Promise.allSettled(reviewCommentTasks);
         const reviewCommentGroups = reviewCommentResults.flatMap((result, index) =>
           result.status === "fulfilled"
             ? [

@@ -10,9 +10,11 @@ import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js"
 import type { PluginRegistries } from "@getpaseo/protocol/plugin-registry";
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
-import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
-import { constants, existsSync, unlinkSync } from "fs";
-import { open, rm, stat } from "fs/promises";
+import { createServer as createHTTPServer } from "http";
+import { nodeRequest, nodeResponse } from "./express-node-http.js";
+import { existsSync, unlinkSync } from "fs";
+import { rm, stat, type FileHandle } from "fs/promises";
+import { openFileForRead } from "./file-explorer/service.js";
 import { randomUUID } from "node:crypto";
 import { getHostName } from "./host-name.js";
 import path from "node:path";
@@ -101,30 +103,40 @@ export function formatListenTarget(listenTarget: ListenTarget | null): string | 
 }
 
 export async function fanOutReconciledWorkspaceUpdates(input: {
-  sessions: Iterable<{
-    syncWorkspaceGitObserversForExternalWorkspaceIds(workspaceIds: Iterable<string>): Promise<void>;
-    emitWorkspaceUpdatesForExternalWorkspaceIds(workspaceIds: Iterable<string>): Promise<void>;
-  }>;
+  sessions: readonly {
+    syncWorkspaceGitObserversForExternalWorkspaceIds(
+      workspaceIds: readonly string[],
+    ): Promise<void>;
+    emitWorkspaceUpdatesForExternalWorkspaceIds(workspaceIds: readonly string[]): Promise<void>;
+  }[];
   workspaceIds: readonly string[];
   logger: Pick<Logger, "warn">;
 }): Promise<void> {
-  await Promise.all(
-    Array.from(input.sessions, async (session) => {
-      try {
-        await session.syncWorkspaceGitObserversForExternalWorkspaceIds(input.workspaceIds);
-      } catch (error) {
-        input.logger.warn(
-          { err: error },
-          "Failed to sync workspace Git observers after reconciliation",
-        );
-      }
-      try {
-        await session.emitWorkspaceUpdatesForExternalWorkspaceIds(input.workspaceIds);
-      } catch (error) {
-        input.logger.warn({ err: error }, "Failed to emit workspace updates after reconciliation");
-      }
-    }),
-  );
+  // A loop, not Array.from(iterable, mapper), which scriptc lowers only for arrays and strings.
+  const updates: Promise<void>[] = [];
+  for (const session of input.sessions) {
+    updates.push(
+      (async () => {
+        try {
+          await session.syncWorkspaceGitObserversForExternalWorkspaceIds(input.workspaceIds);
+        } catch (error) {
+          input.logger.warn(
+            { err: error },
+            "Failed to sync workspace Git observers after reconciliation",
+          );
+        }
+        try {
+          await session.emitWorkspaceUpdatesForExternalWorkspaceIds(input.workspaceIds);
+        } catch (error) {
+          input.logger.warn(
+            { err: error },
+            "Failed to emit workspace updates after reconciliation",
+          );
+        }
+      })(),
+    );
+  }
+  await Promise.all(updates);
 }
 
 import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
@@ -185,7 +197,7 @@ import type { TerminalManager } from "../terminal/terminal-manager.js";
 import { startWorkerTerminalManager } from "../terminal/worker-terminal-manager.js";
 import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
-import { createRelayRuntime, type RelayRuntime } from "./relay-runtime.js";
+import { createRelayRuntime, type RelayRuntime, type RelayRuntimeConfig } from "./relay-runtime.js";
 import { admitSecuredRelaySocket } from "./websocket/secure-relay-ingress.js";
 import type { PushNotificationSender } from "./push/index.js";
 import { getOrCreateServerId } from "./server-id.js";
@@ -254,8 +266,6 @@ import { ManagedPluginSources } from "./plugins/managed-source.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
 const MCP_DEBUG_SECRET = "[redacted]";
-const DOWNLOAD_OPEN_FLAGS =
-  process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
 
 function formatHostForHttpUrl(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -606,15 +616,9 @@ function createInitialMutableDaemonConfig(config: ResolvedDaemonSettings): Mutab
     pluginsEnabled: config.pluginsEnabled ?? false,
     plugins: config.plugins ?? {},
     skills: { selection: config.skillSelection },
+    ...(config.terminalProfiles !== undefined ? { terminalProfiles: config.terminalProfiles } : {}),
+    ...(config.agentProfiles !== undefined ? { agentProfiles: config.agentProfiles } : {}),
   };
-
-  if (config.terminalProfiles !== undefined) {
-    initialConfig.terminalProfiles = config.terminalProfiles;
-  }
-
-  if (config.agentProfiles !== undefined) {
-    initialConfig.agentProfiles = config.agentProfiles;
-  }
 
   return initialConfig;
 }
@@ -883,9 +887,10 @@ export async function createPaseoDaemon(
       return;
     }
 
-    let fileHandle: Awaited<ReturnType<typeof open>> | null = null;
+    let fileHandle: FileHandle | null = null;
     try {
-      fileHandle = await open(entry.absolutePath, DOWNLOAD_OPEN_FLAGS);
+      // O_NOFOLLOW, as the file explorer opens files; see openFileForRead for native binaries.
+      fileHandle = await openFileForRead(entry.absolutePath);
       const fileStats = await fileHandle.stat();
       if (res.destroyed) {
         return;
@@ -917,7 +922,7 @@ export async function createPaseoDaemon(
         res.status(404).json({ error: "File not found" });
       }
     } finally {
-      await fileHandle?.close().catch(() => undefined);
+      if (fileHandle) await fileHandle.close().catch(() => undefined);
     }
   };
 
@@ -1630,11 +1635,9 @@ export async function createPaseoDaemon(
         // StreamableHTTPServerTransport's built-in check requires exact Host header matches.
         enableDnsRebindingProtection: false,
       });
-      Object.assign(transport, {
-        onerror: (err: Error) => {
-          logger.error({ err }, "Agent MCP transport error");
-        },
-      });
+      transport.onerror = (err: Error) => {
+        logger.error({ err }, "Agent MCP transport error");
+      };
 
       await agentMcpServer.connect(transport);
       return { server: agentMcpServer, transport };
@@ -1702,11 +1705,7 @@ export async function createPaseoDaemon(
           void server.close();
         });
 
-        await transport.handleRequest(
-          req as unknown as IncomingMessage,
-          res as unknown as ServerResponse,
-          req.body,
-        );
+        await transport.handleRequest(nodeRequest(req), nodeResponse(res), req.body);
       } catch (err) {
         logger.error({ err }, "Failed to handle Agent MCP request");
         if (!res.headersSent) {
@@ -1867,17 +1866,25 @@ export async function createPaseoDaemon(
                   return appBaseUrl;
                 },
                 desktopManaged: config.desktopManaged === true,
-                getRelayConfig: () => ({
-                  ...(relayRuntime?.getConfig() ?? {
-                    enabled: daemonConfigStore.get().relay?.enabled ?? relayEnabled,
-                    endpoint: relayEndpoint,
-                    publicEndpoint: relayPublicEndpoint,
-                    useTls: relayUseTls,
-                    publicUseTls: relayPublicUseTls,
-                  }),
-                  requireProtectedSecurity:
-                    daemonConfigStore.get().relay?.requireProtectedSecurity === true,
-                }),
+                getRelayConfig: () => {
+                  // Typed locals, not an inline `??`: scriptc needs both sides to have one type.
+                  let relayConfig: RelayRuntimeConfig | undefined = relayRuntime?.getConfig();
+                  if (relayConfig === undefined) {
+                    const enabled: boolean = daemonConfigStore.get().relay?.enabled ?? relayEnabled;
+                    relayConfig = {
+                      enabled,
+                      endpoint: relayEndpoint,
+                      publicEndpoint: relayPublicEndpoint,
+                      useTls: relayUseTls,
+                      publicUseTls: relayPublicUseTls,
+                    };
+                  }
+                  return {
+                    ...relayConfig,
+                    requireProtectedSecurity:
+                      daemonConfigStore.get().relay?.requireProtectedSecurity === true,
+                  };
+                },
               },
               serviceProxyPublicBaseUrl,
               browserToolsBroker,

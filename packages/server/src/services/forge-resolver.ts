@@ -95,7 +95,9 @@ export function createForgeResolver(options: CreateForgeResolverOptions = {}): F
     if (cached && cached.expiresAt > now()) {
       return cached.promise;
     }
-    const pending = resolveRemoteUrl(cwd).catch((error: unknown) => {
+    // Declared before assignment: scriptc cannot lower a const read inside its own initializer.
+    let pending: Promise<string | null> | null = null;
+    pending = resolveRemoteUrl(cwd).catch((error: unknown) => {
       if (remoteUrlByCwd.get(cwd)?.promise === pending) {
         remoteUrlByCwd.delete(cwd);
       }

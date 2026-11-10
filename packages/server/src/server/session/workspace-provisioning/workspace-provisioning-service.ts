@@ -20,6 +20,7 @@ import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.j
 import { deriveProjectKey } from "../../project-key.js";
 import { areEquivalentPaths, createRealpathAwarePathMatcher } from "../../../utils/path.js";
 import type { UntrustedWorkspaceSource } from "../../workspace-automation-gate.js";
+import type { ImportedProviderSession } from "../../agent/import-sessions.js";
 
 export interface ResolveOrCreateWorkspaceIdInput {
   createdWorktree: CreatePaseoWorktreeWorkflowResult | null;
@@ -57,10 +58,11 @@ export interface CreateWorktreeWorkspaceInput {
 }
 
 export interface WorkspaceProvisioningService {
-  runInImportWorkspace<T>(
+  // Concrete value type: scriptc cannot lower a generic function held in a record.
+  runInImportWorkspace(
     input: ImportWorkspaceInput,
-    operation: (workspace: PersistedWorkspaceRecord) => Promise<T>,
-  ): Promise<ImportWorkspaceResult<T>>;
+    operation: (workspace: PersistedWorkspaceRecord) => Promise<ImportedProviderSession>,
+  ): Promise<ImportWorkspaceResult<ImportedProviderSession>>;
   findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord>;
   resolveOrCreateWorkspaceIdForCreateAgent(input: ResolveOrCreateWorkspaceIdInput): Promise<string>;
   createWorkspaceForDirectory(
@@ -125,10 +127,10 @@ export function createWorkspaceProvisioningService(deps: {
     return checkout;
   }
 
-  async function runInImportWorkspace<T>(
+  async function runInImportWorkspace(
     input: ImportWorkspaceInput,
-    operation: (workspace: PersistedWorkspaceRecord) => Promise<T>,
-  ): Promise<ImportWorkspaceResult<T>> {
+    operation: (workspace: PersistedWorkspaceRecord) => Promise<ImportedProviderSession>,
+  ): Promise<ImportWorkspaceResult<ImportedProviderSession>> {
     if (input.requestedWorkspaceId) {
       const workspace = await workspaceRegistry.get(input.requestedWorkspaceId);
       if (!workspace || workspace.archivedAt) {
@@ -307,7 +309,10 @@ export function createWorkspaceProvisioningService(deps: {
   }
 
   function emitWorkspaceCreated(workspace: PersistedWorkspaceRecord): void {
-    deps.lifecycle?.emit("workspace.create.after", {
+    // Narrowed first: scriptc has no optional method calls on an optional field.
+    const lifecycle = deps.lifecycle;
+    if (!lifecycle) return;
+    lifecycle.emit("workspace.create.after", {
       workspace: describeHookWorkspace(workspace),
     });
   }

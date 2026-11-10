@@ -71,14 +71,16 @@ function ruleFsts(modelDir: string, engine: TtsEngine): string {
   return engine.ruleFsts.map((name) => path.join(modelDir, name)).join(",");
 }
 
+// generateAsync is a method signature: a scriptc binary matches class methods of the FFI module
+// (native/sherpa/sherpa-onnx-ffi.ts) only to method signatures.
 interface SherpaOfflineTtsNative {
   sampleRate?: number;
-  generateAsync: (args: {
+  generateAsync(args: {
     text: string;
     sid: number;
     speed: number;
     enableExternalBuffer: boolean;
-  }) => Promise<{ samples?: Float32Array | number[]; sampleRate?: number } | undefined>;
+  }): Promise<{ samples?: Float32Array | number[]; sampleRate?: number } | undefined>;
   free?: () => void;
 }
 

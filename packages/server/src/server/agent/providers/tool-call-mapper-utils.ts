@@ -124,8 +124,8 @@ export function extractCodexTerminalSessionId(value: string | undefined): string
   return nonEmptyString(match?.[1]);
 }
 
-export function flattenReadContent<Chunk extends ReadChunkLike>(
-  value: string | Chunk | Chunk[] | undefined,
+export function flattenReadContent(
+  value: string | ReadChunkLike | ReadChunkLike[] | undefined,
 ): string | undefined {
   if (typeof value === "string") {
     return nonEmptyString(value);

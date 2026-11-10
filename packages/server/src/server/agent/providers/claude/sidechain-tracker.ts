@@ -358,7 +358,9 @@ export class ClaudeSidechainTracker {
       return [];
     }
     const actions: SubAgentActionCandidate[] = [];
-    for (const block of content) {
+    for (const contentBlock of content) {
+      // Guarded as unknown: scriptc cannot represent the SDK block union narrowed by the guard.
+      const block: unknown = contentBlock;
       if (
         !isClaudeContentChunk(block) ||
         !(

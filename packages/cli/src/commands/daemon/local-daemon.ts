@@ -40,6 +40,19 @@ function resolveDaemonRunnerEntry(): string {
   throw new Error("Unable to resolve @getpaseo/server package root for daemon runner");
 }
 
+// A scriptc CLI (process.argv[0] "scriptc") is no JavaScript runtime: it starts the native
+// daemon that ships beside it (make dist). Node runs the server's supervisor script.
+function resolveDaemonCommand(): { command: string; args: string[] } {
+  if (process.argv[0] === "scriptc") {
+    return { command: path.join(path.dirname(process.execPath), "paseo-daemon"), args: [] };
+  }
+  const entry = resolveDaemonRunnerEntry();
+  return {
+    command: process.execPath,
+    args: [...(entry.endsWith(".ts") ? ["--import", "tsx"] : []), entry],
+  };
+}
+
 export async function launchLocalDaemon(options: {
   home: string;
   timeoutMs?: number;
@@ -50,11 +63,11 @@ export async function launchLocalDaemon(options: {
   process.once("SIGINT", cancel);
   process.once("SIGTERM", cancel);
   try {
-    const entry = resolveDaemonRunnerEntry();
+    const daemon = resolveDaemonCommand();
     return await startDaemonInstance({
       home: resolvePaseoHome({ PASEO_HOME: options.home }),
-      command: process.execPath,
-      args: [...(entry.endsWith(".ts") ? ["--import", "tsx"] : []), entry],
+      command: daemon.command,
+      args: daemon.args,
       env: process.env,
       mode: options.foreground ? "deployment" : "managed",
       foreground: options.foreground,

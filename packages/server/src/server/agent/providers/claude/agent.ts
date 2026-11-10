@@ -4,7 +4,7 @@ import { validateProviderOptions } from "../../provider-options.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { promises } from "node:fs";
+import fsPromises from "node:fs/promises";
 import path from "node:path";
 import { LRUCache } from "lru-cache";
 import { createImportDescriptorScheduler } from "./import-descriptor-scheduler.js";
@@ -17,7 +17,6 @@ import {
   type PermissionUpdate,
   type Query,
   type SDKMessage,
-  type SDKPartialAssistantMessage,
   type SDKResultMessage,
   type SDKSystemMessage,
   type SDKUserMessage,
@@ -149,11 +148,10 @@ import {
   type ResolvedProviderLaunch,
 } from "../../provider-launch-config.js";
 import { withTimeout } from "../../../../utils/promise-timeout.js";
-import { terminateWithTreeKill } from "../../../../utils/tree-kill.js";
+import { terminateChildWithTreeKill } from "../../../../utils/tree-kill.js";
 import { execCommand } from "../../../../utils/spawn.js";
 import { composeSystemPromptParts } from "../../system-prompt.js";
 
-const fsPromises = promises;
 const CLAUDE_SETTING_SOURCES: NonNullable<ClaudeOptions["settingSources"]> = [
   "user",
   "project",
@@ -3033,7 +3031,7 @@ class ClaudeAgentSession implements AgentSession {
     // orphan accumulation. The SDK's internal cleanup may only kill the
     // direct child process.
     if (this.childProcess) {
-      const result = await terminateWithTreeKill(this.childProcess, {
+      const result = await terminateChildWithTreeKill(this.childProcess, {
         gracefulTimeoutMs: 2_000,
         forceTimeoutMs: 2_000,
       });
@@ -3053,7 +3051,7 @@ class ClaudeAgentSession implements AgentSession {
       const historyPath = await this.resolveHistoryPath(this.claudeSessionId);
       if (historyPath) {
         try {
-          await promises.rm(historyPath, { force: true });
+          await fsPromises.rm(historyPath, { force: true });
         } catch (error) {
           this.logger.warn(
             { err: error, historyPath, claudeSessionId: this.claudeSessionId },
@@ -3491,7 +3489,7 @@ class ClaudeAgentSession implements AgentSession {
     // If we skip this, MCP children of the previous claude process can
     // survive as orphans when the session spawns a replacement query.
     if (retiredChild) {
-      await terminateWithTreeKill(retiredChild, {
+      await terminateChildWithTreeKill(retiredChild, {
         gracefulTimeoutMs: 2_000,
         forceTimeoutMs: 2_000,
       }).catch(() => {
@@ -3680,6 +3678,7 @@ class ClaudeAgentSession implements AgentSession {
       sessionBinding.resume = this.claudeSessionId;
     }
 
+    const runtimeDisallowedTools = this.runtimeSettings?.disallowedTools;
     const base: ClaudeOptions = {
       cwd: this.config.cwd,
       includePartialMessages: true,
@@ -3721,25 +3720,25 @@ class ClaudeAgentSession implements AgentSession {
       hooks: this.buildSubagentEffortHooks(),
       ...(this.persistSession === undefined ? {} : { persistSession: this.persistSession }),
       env: sdkEnv,
+      // One literal: scriptc cannot assign to fields of the SDK's Options type (SC1090). A
+      // repeated key keeps its first position, as the assignments did.
+      ...(this.config.mcpServers
+        ? { mcpServers: this.normalizeMcpServers(this.config.mcpServers) }
+        : {}),
+      ...(this.config.model ? { model: this.config.model } : {}),
+      ...(this.claudeSessionId && !this.pendingFreshSessionId
+        ? { resume: this.claudeSessionId }
+        : {}),
+      ...(runtimeDisallowedTools?.length
+        ? {
+            disallowedTools: [
+              ...(providerOptions.disallowedTools ?? []),
+              ...runtimeDisallowedTools,
+            ],
+          }
+        : {}),
     };
-
-    if (this.config.mcpServers) {
-      base.mcpServers = this.normalizeMcpServers(this.config.mcpServers);
-    }
-
-    if (this.config.model) {
-      base.model = this.config.model;
-    }
     this.lastOptionsModel = base.model ?? null;
-    if (this.claudeSessionId && !this.pendingFreshSessionId) {
-      base.resume = this.claudeSessionId;
-    }
-    if (this.runtimeSettings?.disallowedTools?.length) {
-      base.disallowedTools = [
-        ...(base.disallowedTools ?? []),
-        ...this.runtimeSettings.disallowedTools,
-      ];
-    }
     return base;
   }
 
@@ -4451,7 +4450,7 @@ class ClaudeAgentSession implements AgentSession {
     // Tree-kill for the same reason the restart path does: MCP children of the
     // retired claude process outlive it otherwise.
     if (retiredChild) {
-      await terminateWithTreeKill(retiredChild, {
+      await terminateChildWithTreeKill(retiredChild, {
         gracefulTimeoutMs: 2_000,
         forceTimeoutMs: 2_000,
       }).catch(() => {
@@ -4952,7 +4951,9 @@ class ClaudeAgentSession implements AgentSession {
     if (usageUpdatedEvent) {
       events.push(usageUpdatedEvent);
     }
-    const timelineItems = await this.mapPartialEvent(message.event, {
+    // Read as a record: the SDK's event union includes message_delta, whose Delta type is a
+    // namespace declaration in @anthropic-ai/sdk that scriptc cannot lower.
+    const timelineItems = await this.mapPartialEvent(toObjectRecord(message.event) ?? {}, {
       suppressAssistantText: options?.suppressAssistantText ?? false,
       suppressReasoning: options?.suppressReasoning ?? false,
     });
@@ -5332,7 +5333,7 @@ class ClaudeAgentSession implements AgentSession {
   private notifySubscribers(event: AgentStreamEvent): void {
     const turnId =
       getAgentStreamEventTurnId(event) ?? this.activeForegroundTurnId ?? this.autonomousTurn?.id;
-    const tagged = turnId ? { ...event, turnId } : event;
+    const tagged = turnId ? withStreamEventTurnId(event, turnId) : event;
     this.logger.trace(
       {
         agentId: this.agentId,
@@ -5955,7 +5956,7 @@ class ClaudeAgentSession implements AgentSession {
     return undefined;
   }
 
-  private updatePartialEventToolState(event: SDKPartialAssistantMessage["event"]): boolean {
+  private updatePartialEventToolState(event: Record<string, unknown>): boolean {
     if (event.type === "content_block_start") {
       const block = isClaudeContentChunk(event.content_block) ? event.content_block : null;
       if (
@@ -5972,7 +5973,10 @@ class ClaudeAgentSession implements AgentSession {
       const delta = isClaudeContentChunk(event.delta) ? event.delta : null;
       if (delta?.type === "input_json_delta") {
         const partialJson = typeof delta.partial_json === "string" ? delta.partial_json : undefined;
-        this.handleToolInputDelta(event.index, partialJson);
+        this.handleToolInputDelta(
+          typeof event.index === "number" ? event.index : undefined,
+          partialJson,
+        );
         return true;
       }
       return false;
@@ -5988,7 +5992,7 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   private async mapPartialEvent(
-    event: SDKPartialAssistantMessage["event"],
+    event: Record<string, unknown>,
     options?: {
       suppressAssistantText?: boolean;
       suppressReasoning?: boolean;
@@ -7001,9 +7005,15 @@ function readClaudeCommandLifecycle(message: unknown): ClaudeCommandLifecycle | 
   };
 }
 
+// scriptc maps a spread of the event union back into the union only through a declared return type.
+function withStreamEventTurnId(event: AgentStreamEvent, turnId: string): AgentStreamEvent {
+  const tagged = { ...event, turnId };
+  return tagged;
+}
+
 async function transcriptExists(file: string): Promise<boolean> {
   try {
-    await fs.promises.access(file);
+    await fsPromises.access(file);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;

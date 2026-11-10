@@ -6,6 +6,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import express, { type RequestHandler } from "express";
 import type { Logger } from "pino";
+import { nodeRequest, nodeResponse } from "./express-node-http.js";
 
 export type ServiceProxyListenTarget =
   | { type: "tcp"; host: string; port: number }
@@ -327,7 +328,11 @@ function proxyHttpRequest({
   route: ServiceProxyRoute;
   logger: Logger;
 }): void {
-  const forwardedHeaders = buildForwardedHeaders({ req, route, protocol: req.protocol });
+  const forwardedHeaders = buildForwardedHeaders({
+    req: nodeRequest(req),
+    route,
+    protocol: req.protocol,
+  });
 
   const proxyReq = requestLocalService(
     {
@@ -339,7 +344,8 @@ function proxyHttpRequest({
     (proxyRes) => {
       const responseHeaders = stripHopByHopHeaders(proxyRes.headers);
       res.writeHead(proxyRes.statusCode ?? 502, responseHeaders);
-      proxyRes.pipe(res, { end: true });
+      // One-argument pipe (end defaults to true): scriptc lowers no other form.
+      proxyRes.pipe(nodeResponse(res));
     },
   );
   proxyReq.on("error", (err) => {

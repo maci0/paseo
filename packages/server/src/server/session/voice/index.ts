@@ -71,7 +71,9 @@ export class VoiceSessions {
       try {
         active.voice.cancel();
       } finally {
-        await Promise.allSettled(active.pending);
+        // A Promise<void>[]: scriptc's Promise.allSettled takes only an array of promises.
+        const pending: Promise<void>[] = [...active.pending];
+        await Promise.allSettled(pending);
         await active.voice.cleanup();
       }
       if (this.sources.get(source) === active) this.sources.delete(source);

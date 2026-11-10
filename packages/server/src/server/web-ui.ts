@@ -1,4 +1,4 @@
-import { createReadStream, readFileSync, statSync } from "node:fs";
+import { createReadStream, readFileSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
 import type { RequestHandler, Response } from "express";
 import type { Logger } from "pino";
@@ -98,7 +98,7 @@ function resolveTargetFile(distDir: string, requestPath: string): ResolvedTarget
   return { resolvedFile, isIndexHtml };
 }
 
-function safeStat(filePath: string): ReturnType<typeof statSync> | null {
+function safeStat(filePath: string): Stats | null {
   try {
     return statSync(filePath);
   } catch {

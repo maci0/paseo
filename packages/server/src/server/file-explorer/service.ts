@@ -1,9 +1,15 @@
-import { constants, promises as fs, type BigIntStats, type Stats } from "fs";
+import { promises as fs, type Stats } from "fs";
 import type { FileHandle } from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
 import { expandUserPath, resolvePathFromBase } from "../path-utils.js";
 import { runGitCommand } from "../../utils/run-git-command.js";
+import {
+  openNoFollowForRead,
+  statHandleRevision,
+  statPathRevision,
+  type FileRevisionStats,
+} from "./node-file-io.js";
 
 export type ExplorerEntryKind = "file" | "directory";
 export type ExplorerFileKind = "text" | "image" | "binary";
@@ -109,21 +115,15 @@ const DEFAULT_TEXT_MIME_TYPE = "text/plain";
 const FILE_TYPE_SAMPLE_BYTES = 8192;
 export const FILE_EXPLORER_STREAM_CHUNK_BYTES = 256 * 1024;
 export const MAX_EDITABLE_FILE_BYTES = 1024 * 1024;
-const READ_FILE_OPEN_FLAGS =
-  process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
 const ACCESS_OUTSIDE_WORKSPACE_MESSAGE = "Access outside of workspace is not allowed";
 
-function fileRevision(stats: BigIntStats): string {
-  return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}`;
-}
-
 function matchesExpectedRevision(
-  stats: BigIntStats,
+  stats: FileRevisionStats,
   expectedModifiedAt: string,
   expectedRevision?: string,
 ): boolean {
   return expectedRevision
-    ? fileRevision(stats) === expectedRevision
+    ? stats.revision === expectedRevision
     : stats.mtime.toISOString() === expectedModifiedAt;
 }
 
@@ -254,18 +254,18 @@ export async function readExplorerFileBytes({
   const handle = await openFileForRead(filePath.resolvedPath);
 
   try {
-    const stats = await handle.stat({ bigint: true });
+    const stats = await statHandle(handle);
 
-    if (!stats.isFile()) {
+    if (!stats.isFile) {
       throw new Error("Requested path is not a file");
     }
 
     const ext = path.extname(filePath.resolvedPath).toLowerCase();
     const basePayload = {
       path: normalizeRelativePath({ root, targetPath: filePath.requestedPath }),
-      size: Number(stats.size),
+      size: stats.size,
       modifiedAt: stats.mtime.toISOString(),
-      revision: fileRevision(stats),
+      revision: stats.revision,
     };
 
     const buffer = await handle.readFile();
@@ -309,13 +309,13 @@ export async function streamExplorerFile(
   const handle = await openFileForRead(filePath.resolvedPath);
 
   try {
-    const stats = await handle.stat({ bigint: true });
-    if (!stats.isFile()) {
+    const stats = await statHandle(handle);
+    if (!stats.isFile) {
       throw new Error("Requested path is not a file");
     }
 
-    const advertisedSize = Number(stats.size);
-    const advertisedRevision = fileRevision(stats);
+    const advertisedSize = stats.size;
+    const advertisedRevision = stats.revision;
     const ext = path.extname(filePath.resolvedPath).toLowerCase();
     const isImage = ext in IMAGE_MIME_TYPES;
     const isBinary =
@@ -399,8 +399,8 @@ async function* readFileHandleChunks(
     yield chunk.subarray(0, bytesRead);
   }
 
-  const finalStats = await handle.stat({ bigint: true });
-  if (fileRevision(finalStats) !== advertisedRevision) {
+  const finalStats = await statHandle(handle);
+  if (finalStats.revision !== advertisedRevision) {
     throw new Error("File changed during transfer");
   }
 }
@@ -414,8 +414,8 @@ export async function getExplorerFileVersion({
     const filePath = await resolveScopedPath({ root, relativePath });
     const handle = await openFileForRead(filePath.resolvedPath);
     try {
-      const stats = await handle.stat({ bigint: true });
-      if (!stats.isFile()) {
+      const stats = await statHandle(handle);
+      if (!stats.isFile) {
         return { status: "error", cwd, path: relativePath, error: "Requested path is not a file" };
       }
       const type = await sniffFileType(handle, path.extname(filePath.resolvedPath).toLowerCase());
@@ -423,9 +423,9 @@ export async function getExplorerFileVersion({
         status: "ready",
         cwd,
         path: normalizeRelativePath({ root, targetPath: filePath.requestedPath }),
-        size: Number(stats.size),
+        size: stats.size,
         modifiedAt: stats.mtime.toISOString(),
-        revision: fileRevision(stats),
+        revision: stats.revision,
         kind: type.kind,
         mimeType: type.mimeType,
       };
@@ -471,11 +471,11 @@ export async function writeExplorerFile({
     filePath = await resolveScopedPath({ root, relativePath });
     const handle = await openFileForRead(filePath.resolvedPath);
     try {
-      const stats = await handle.stat({ bigint: true });
-      if (!stats.isFile()) {
+      const stats = await statHandle(handle);
+      if (!stats.isFile) {
         return { status: "error", error: "Requested path is not a file" };
       }
-      if (stats.size > BigInt(MAX_EDITABLE_FILE_BYTES)) {
+      if (stats.size > MAX_EDITABLE_FILE_BYTES) {
         return { status: "error", error: "File is too large to edit" };
       }
       if (contentEncoding === "utf-8") {
@@ -484,7 +484,7 @@ export async function writeExplorerFile({
           return { status: "error", error: "Binary files cannot be edited" };
         }
       }
-      currentMode = Number(stats.mode);
+      currentMode = stats.mode;
       const modifiedAt = stats.mtime.toISOString();
       if (!matchesExpectedRevision(stats, expectedModifiedAt, expectedRevision)) {
         return {
@@ -493,9 +493,9 @@ export async function writeExplorerFile({
             status: "ready",
             cwd: expandUserPath(root),
             path: normalizeRelativePath({ root, targetPath: filePath.requestedPath }),
-            size: Number(stats.size),
+            size: stats.size,
             modifiedAt,
-            revision: fileRevision(stats),
+            revision: stats.revision,
           },
         };
       }
@@ -526,7 +526,7 @@ export async function writeExplorerFile({
     await temporaryHandle.sync();
     await temporaryHandle.close();
     temporaryHandle = null;
-    const latestStats = await fs.stat(filePath.resolvedPath, { bigint: true });
+    const latestStats = await statPath(filePath.resolvedPath);
     if (!matchesExpectedRevision(latestStats, expectedModifiedAt, expectedRevision)) {
       return {
         status: "conflict",
@@ -534,24 +534,24 @@ export async function writeExplorerFile({
           status: "ready",
           cwd: expandUserPath(root),
           path: normalizeRelativePath({ root, targetPath: filePath.requestedPath }),
-          size: Number(latestStats.size),
+          size: latestStats.size,
           modifiedAt: latestStats.mtime.toISOString(),
-          revision: fileRevision(latestStats),
+          revision: latestStats.revision,
         },
       };
     }
     await fs.rename(temporaryPath, filePath.resolvedPath);
-    const stats = await fs.stat(filePath.resolvedPath, { bigint: true });
+    const stats = await statPath(filePath.resolvedPath);
     return {
       status: "written",
       modifiedAt: stats.mtime.toISOString(),
-      size: Number(stats.size),
-      revision: fileRevision(stats),
+      size: stats.size,
+      revision: stats.revision,
     };
   } catch (error) {
     return { status: "error", error: error instanceof Error ? error.message : String(error) };
   } finally {
-    await temporaryHandle?.close().catch(() => undefined);
+    if (temporaryHandle) await temporaryHandle.close().catch(() => undefined);
     await fs.unlink(temporaryPath).catch(() => undefined);
   }
 }
@@ -778,10 +778,9 @@ export async function deleteExplorerEntry({
     // Remove the requested path, not the realpath: deleting a symlink must
     // remove the link, never its target. lstat keeps the same guarantee.
     const stats = await fs.lstat(scoped.requestedPath);
-    await fs.rm(scoped.requestedPath, {
-      recursive: stats.isDirectory(),
-      force: false,
-    });
+    // Literal options: scriptc lowers rm only with boolean-literal flags.
+    if (stats.isDirectory()) await fs.rm(scoped.requestedPath, { recursive: true, force: false });
+    else await fs.rm(scoped.requestedPath, { recursive: false, force: false });
     return {
       status: "ok",
       path: normalizeRelativePath({ root, targetPath: scoped.requestedPath }),
@@ -847,8 +846,62 @@ function assertWithinWorkspace(root: string, candidate: string): void {
   if (isOutsideWorkspace) throw new Error(ACCESS_OUTSIDE_WORKSPACE_MESSAGE);
 }
 
-async function openFileForRead(filePath: string): Promise<FileHandle> {
-  return fs.open(filePath, READ_FILE_OPEN_FLAGS);
+// A scriptc executable reports "scriptc" as argv[0]; Node reports its own path. scriptc has no
+// numeric open flags (O_NOFOLLOW) and no bigint Stats, so a native binary takes the paths below.
+const RUNNING_AS_SCRIPTC_BINARY = process.argv[0] === "scriptc";
+
+/** The error Node raises when O_NOFOLLOW meets a symbolic link. */
+class SymbolicLinkRefusedError extends Error {
+  readonly code = "ELOOP";
+  readonly syscall = "open";
+  constructor(readonly path: string) {
+    super(`ELOOP: too many symbolic links encountered, open '${path}'`);
+  }
+}
+
+/**
+ * Opens `filePath` for reading and refuses a symbolic link at its final component. Native
+ * binaries cannot pass O_NOFOLLOW, so they lstat the path, open it, and refuse the handle unless
+ * it is the same file (device and inode) that lstat saw: a link swapped in between fails the
+ * comparison. A file replaced by a link to that same file after the lstat is still opened.
+ */
+export async function openFileForRead(filePath: string): Promise<FileHandle> {
+  if (!RUNNING_AS_SCRIPTC_BINARY) return openNoFollowForRead(filePath);
+  if (process.platform === "win32") return fs.open(filePath, "r");
+  const linkStats = await fs.lstat(filePath);
+  if (linkStats.isSymbolicLink()) throw new SymbolicLinkRefusedError(filePath);
+  const handle = await fs.open(filePath, "r");
+  try {
+    const openedStats = await handle.stat();
+    if (openedStats.dev !== linkStats.dev || openedStats.ino !== linkStats.ino) {
+      throw new SymbolicLinkRefusedError(filePath);
+    }
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+  return handle;
+}
+
+// Native revisions use mtimeMs, which is coarser than Node's mtimeNs.
+function nativeRevisionStats(stats: Stats): FileRevisionStats {
+  return {
+    isFile: stats.isFile(),
+    size: stats.size,
+    mode: stats.mode,
+    mtime: stats.mtime,
+    revision: `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}`,
+  };
+}
+
+async function statHandle(handle: FileHandle): Promise<FileRevisionStats> {
+  if (!RUNNING_AS_SCRIPTC_BINARY) return statHandleRevision(handle);
+  return nativeRevisionStats(await handle.stat());
+}
+
+async function statPath(filePath: string): Promise<FileRevisionStats> {
+  if (!RUNNING_AS_SCRIPTC_BINARY) return statPathRevision(filePath);
+  return nativeRevisionStats(await fs.stat(filePath));
 }
 
 async function buildEntryPayload({

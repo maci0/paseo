@@ -1,7 +1,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { constants as fsConstants, realpath } from "fs";
-import { copyFile, mkdir, rm, stat } from "fs/promises";
+import { copyFile, mkdir, realpath as nativeRealpath, rm, stat } from "fs/promises";
 import { join, basename, dirname, isAbsolute, resolve, sep } from "path";
 import net from "node:net";
 import { createHash } from "node:crypto";
@@ -46,7 +46,7 @@ import {
   getRelativePathInsideRoot,
   isPathInsideRoot,
 } from "./path.js";
-import { terminateWithTreeKill } from "./tree-kill.js";
+import { terminateWithTreeKill, treeKillTargetForChild } from "./tree-kill.js";
 
 export { slugify, validateBranchSlug } from "@getpaseo/protocol/branch-slug";
 
@@ -524,7 +524,7 @@ async function execSetupCommandStreamed(options: {
     });
 
     const abort = () => {
-      termination ??= terminateWithTreeKill(child, {
+      termination ??= terminateWithTreeKill(treeKillTargetForChild(child), {
         gracefulTimeoutMs: 1000,
         forceTimeoutMs: 1000,
       });
@@ -902,9 +902,10 @@ export function mapWorkspaceRelativeCwdToWorktree(input: {
 }
 
 // Keep the former realpathSync spelling on Windows: promises.realpath uses the
-// native resolver and can return an 8.3 alias instead of the long path.
+// native resolver and can return an 8.3 alias instead of the long path. It is the same
+// resolver as realpath.native, which scriptc cannot promisify.
 const resolveOwnershipPath = promisify(realpath);
-const resolveNativeOwnershipPath = promisify(realpath.native);
+const resolveNativeOwnershipPath = (path: string): Promise<string> => nativeRealpath(path);
 const ownershipIdentityIo = pLimit(2);
 
 async function normalizePathForOwnership(input: string): Promise<string> {

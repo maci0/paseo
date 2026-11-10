@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Logger } from "pino";
 import type { ProcessEnvRecord } from "../server/paseo-env.js";
 import {
   GitCommandRuntimeMetricsWindow,
@@ -43,12 +42,18 @@ export function configureGitProcessPolicy(policy: GitProcessPolicy): void {
   gitRuntimeMetrics = createGitCommandRuntimeMetricsWindow(policy);
 }
 
+// Hand-written instead of Pick<Logger, "trace">: scriptc cannot call pino's generic log methods
+// through a Pick of its interface.
+export interface GitCommandTraceLogger {
+  trace(fields: Record<string, unknown>, message: string): void;
+}
+
 export interface GitCommandOptions {
   cwd: string;
   input?: string | Buffer;
   env?: ProcessEnvRecord;
   envOverlay?: ProcessEnvRecord;
-  logger?: Pick<Logger, "trace">;
+  logger?: GitCommandTraceLogger;
   timeout?: number;
   maxOutputBytes?: number;
   acceptExitCodes?: number[];

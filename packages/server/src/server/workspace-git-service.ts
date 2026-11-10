@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { LRUCache } from "lru-cache";
 import { CheckoutDiffCache } from "./checkout-diff-cache.js";
-import pLimit from "p-limit";
+import { ConcurrencyLimit } from "../utils/concurrency-limit.js";
 import type pino from "pino";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import { parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
@@ -323,6 +323,20 @@ export type WorkspaceGitSnapshotOptions =
       reason: string;
     };
 
+// Rebuilds read options as snapshot options arm by arm: scriptc cannot convert between the two
+// unions because their arms have different fields.
+function toSnapshotOptions(
+  options: WorkspaceGitReadOptions | undefined,
+): WorkspaceGitSnapshotOptions | undefined {
+  if (options === undefined) return undefined;
+  if (options.force === true) {
+    const forced: WorkspaceGitSnapshotOptions = { force: true, reason: options.reason };
+    return forced;
+  }
+  const unforced: WorkspaceGitSnapshotOptions = { reason: options.reason };
+  return unforced;
+}
+
 interface WorkspaceGitRefreshRequest {
   force: boolean;
   refreshStructure: boolean;
@@ -589,14 +603,13 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private readonly fileObserver: FileObserver;
   private readonly deps: WorkspaceGitServiceDependencies;
   private readonly forgeResolver: ForgeResolver;
-  private readonly workspaceRefreshLimit = pLimit({
-    concurrency: WORKSPACE_GIT_REFRESH_CONCURRENCY,
+  private readonly workspaceRefreshLimit = new ConcurrencyLimit(WORKSPACE_GIT_REFRESH_CONCURRENCY, {
     rejectOnClear: true,
   });
-  private readonly workspaceObservationSetupLimit = pLimit({
-    concurrency: WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY,
-    rejectOnClear: true,
-  });
+  private readonly workspaceObservationSetupLimit = new ConcurrencyLimit(
+    WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY,
+    { rejectOnClear: true },
+  );
   private readonly disposeController = new AbortController();
   private disposed = false;
   private disposePromise: Promise<void> | null = null;
@@ -808,7 +821,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const normalizedOptions = this.normalizeCheckoutDiffOptions(options);
     // Initial inventory events cover the watcher setup gap. Process them before
     // starting a cold diff, rather than invalidating that build halfway through.
-    await this.workspaceTargets.get(normalizedCwd)?.observationSetupPromise;
+    // A resolved promise stands in for null: scriptc cannot await a value that may be null.
+    await (this.workspaceTargets.get(normalizedCwd)?.observationSetupPromise ?? Promise.resolve());
     this.assertNotDisposed();
     return this.checkoutDiffCache.read({
       cwd: normalizedCwd,
@@ -922,7 +936,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   async resolveRepoRoot(cwd: string, options?: WorkspaceGitReadOptions): Promise<string> {
-    const snapshot = await this.getSnapshot(cwd, options);
+    const snapshot = await this.getSnapshot(cwd, toSnapshotOptions(options));
     if (!snapshot.git.isGit) {
       throw new Error("Create worktree requires a git repository");
     }
@@ -956,7 +970,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   async getProjectSlug(cwd: string, options?: WorkspaceGitReadOptions): Promise<string> {
-    const snapshot = await this.getSnapshot(cwd, options);
+    const snapshot = await this.getSnapshot(cwd, toSnapshotOptions(options));
     return deriveProjectSlug(resolve(cwd), snapshot.git.isGit ? snapshot.git.remoteUrl : null);
   }
 
@@ -964,7 +978,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     cwd: string,
     options?: WorkspaceGitReadOptions,
   ): Promise<string | null> {
-    const snapshot = await this.getSnapshot(cwd, options);
+    const snapshot = await this.getSnapshot(cwd, toSnapshotOptions(options));
     return snapshot.git.remoteUrl;
   }
 
@@ -1158,7 +1172,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return existingResolution;
     }
 
-    const resolution = this.resolveWorkingTreeWatchTarget(cwd).finally(() => {
+    // Assigned in two steps: scriptc cannot capture a const inside its own initializer.
+    let resolution = this.resolveWorkingTreeWatchTarget(cwd);
+    resolution = resolution.finally(() => {
       if (this.workingTreeWatchResolutions.get(cwd) === resolution) {
         this.workingTreeWatchResolutions.delete(cwd);
       }
@@ -1186,7 +1202,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
 
     const watchPath = repoRoot && cwdPaths?.matches(repoRoot) ? cwd : targetCwd;
-    const setup = this.createWorkingTreeWatchTarget(targetCwd, watchPath, repoRoot).finally(() => {
+    // Assigned in two steps: scriptc cannot capture a const inside its own initializer.
+    let setup = this.createWorkingTreeWatchTarget(targetCwd, watchPath, repoRoot);
+    setup = setup.finally(() => {
       if (this.workingTreeWatchSetups.get(targetCwd) === setup) {
         this.workingTreeWatchSetups.delete(targetCwd);
       }
@@ -1260,12 +1278,13 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return;
     }
 
-    target.observationSetupPromise = this.workspaceObservationSetupLimit(async () => {
-      if (!this.isActiveObservedWorkspaceTarget(target)) {
-        return;
-      }
-      await this.setupWorkspaceObservation(target);
-    })
+    target.observationSetupPromise = this.workspaceObservationSetupLimit
+      .run(async () => {
+        if (!this.isActiveObservedWorkspaceTarget(target)) {
+          return;
+        }
+        await this.setupWorkspaceObservation(target);
+      })
       .catch((error) => {
         if (this.disposed || !this.isActiveObservedWorkspaceTarget(target)) {
           return;
@@ -1340,17 +1359,16 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return target.factsPromise;
     }
 
-    const promise = this.deps
-      .getCheckoutSnapshotFacts(target.cwd, context)
-      .then((facts) => {
-        if (!target.closed) target.latestFacts = facts;
-        return facts;
-      })
-      .finally(() => {
-        if (target.factsPromise === promise) {
-          target.factsPromise = null;
-        }
-      });
+    // Assigned in two steps: scriptc cannot capture a const inside its own initializer.
+    let promise = this.deps.getCheckoutSnapshotFacts(target.cwd, context).then((facts) => {
+      if (!target.closed) target.latestFacts = facts;
+      return facts;
+    });
+    promise = promise.finally(() => {
+      if (target.factsPromise === promise) {
+        target.factsPromise = null;
+      }
+    });
     target.factsPromise = promise;
     return promise;
   }
@@ -1992,7 +2010,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return target.ignoredDirectoriesRefreshPromise;
     }
 
-    const refreshPromise = (async () => {
+    // Assigned in two steps: scriptc cannot capture a const inside its own initializer.
+    let refreshPromise = (async () => {
       while (!target.closed && target.ignoredDirectoriesRefreshRequested) {
         target.ignoredDirectoriesRefreshRequested = false;
         try {
@@ -2004,7 +2023,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
           );
         }
       }
-    })().finally(() => {
+    })();
+    refreshPromise = refreshPromise.finally(() => {
       if (target.ignoredDirectoriesRefreshPromise === refreshPromise) {
         target.ignoredDirectoriesRefreshPromise = null;
       }
@@ -3068,7 +3088,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return Promise.resolve(target.latestSnapshot);
     }
 
-    const promise = this.runWorkspaceRefreshLoop(target, request).finally(() => {
+    // Assigned in two steps: scriptc cannot capture a const inside its own initializer.
+    let promise = this.runWorkspaceRefreshLoop(target, request);
+    promise = promise.finally(() => {
       const state = target.refreshState;
       if (state.status === "in-flight" && state.promise === promise) {
         target.refreshState = { status: "idle" };
@@ -3190,7 +3212,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       }
       try {
         const runRefreshGitCommand = createRunGitCommand(`workspace-refresh:${request.reason}`);
-        const admittedSnapshot = await this.workspaceRefreshLimit(() => {
+        const admittedSnapshot = await this.workspaceRefreshLimit.run(async () => {
           if (target.closed || this.workspaceTargets.get(target.cwd) !== target) {
             return null;
           }

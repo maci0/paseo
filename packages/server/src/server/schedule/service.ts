@@ -311,7 +311,7 @@ export class ScheduleService {
         this.logger.error({ err: error }, "Failed to process schedule tick");
       });
     }, SCHEDULE_TICK_INTERVAL_MS);
-    (timer as unknown as { unref?: () => void }).unref?.();
+    timer.unref();
     this.tickTimer = timer;
   }
 
@@ -513,9 +513,10 @@ export class ScheduleService {
         schedule.target.agentId === agentId &&
         schedule.status !== "completed",
     );
-    const results = await Promise.allSettled(
-      matches.map((schedule) => this.completeScheduleForAgent(schedule.id, agentId, now)),
+    const completions: Promise<boolean>[] = matches.map((schedule) =>
+      this.completeScheduleForAgent(schedule.id, agentId, now),
     );
+    const results = await Promise.allSettled(completions);
     let completed = 0;
     for (const [index, result] of results.entries()) {
       if (result.status === "fulfilled" && result.value) {

@@ -45,8 +45,7 @@ export function addHubDisconnectCommand(
       .command("disconnect")
       .option("--force", "Remove local authority without notifying the Hub"),
   ).action(
-    withOutput(async (...args) => {
-      const options = args.at(-2) as HubDisconnectOptions;
+    withOutput(async (options: HubDisconnectOptions = {} as HubDisconnectOptions) => {
       return runHubDisconnect(options, dependencies);
     }),
   );

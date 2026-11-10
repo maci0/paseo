@@ -10,6 +10,7 @@ import { deriveProjectSlug } from "./workspace-git-metadata.js";
 import type { ScriptHealthEntry, ScriptHealthState } from "./script-health-monitor.js";
 import type {
   ServiceProxySubsystem,
+  ServiceProxyUrlProjection,
   ServiceProxyWorkspaceScriptProjection,
 } from "./service-proxy.js";
 import type { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
@@ -127,26 +128,26 @@ function buildConfiguredScriptPayload(
 
   const type = "service";
   const configuredPort = config.port ?? null;
-  const hostname = (
-    serviceState ??
-    ctx.serviceProxy.projectWorkspaceService({
-      projectSlug: ctx.projectSlug,
-      branchName: ctx.branchName,
-      scriptName,
-      daemonPort: ctx.daemonPort,
-      publicBaseUrl: ctx.serviceProxyPublicBaseUrl,
-    })
-  ).hostname;
+  // Ternaries with a typed result: scriptc rejects '??' whose default has a different type.
+  const hostname = serviceState
+    ? serviceState.hostname
+    : ctx.serviceProxy.projectWorkspaceService({
+        projectSlug: ctx.projectSlug,
+        branchName: ctx.branchName,
+        scriptName,
+        daemonPort: ctx.daemonPort,
+        publicBaseUrl: ctx.serviceProxyPublicBaseUrl,
+      }).hostname;
 
-  const urls =
-    serviceState ??
-    ctx.serviceProxy.projectUrls({
-      projectSlug: ctx.projectSlug,
-      branchName: ctx.branchName,
-      scriptName,
-      daemonPort: ctx.daemonPort,
-      publicBaseUrl: ctx.serviceProxyPublicBaseUrl,
-    });
+  const urls: ServiceProxyUrlProjection = serviceState
+    ? serviceState
+    : ctx.serviceProxy.projectUrls({
+        projectSlug: ctx.projectSlug,
+        branchName: ctx.branchName,
+        scriptName,
+        daemonPort: ctx.daemonPort,
+        publicBaseUrl: ctx.serviceProxyPublicBaseUrl,
+      });
 
   return {
     scriptName,
@@ -169,28 +170,27 @@ function buildOrphanRuntimePayload(
   ctx: BuildPayloadContext,
 ): WorkspaceScriptPayload {
   const type = runtimeEntry.type;
-  const hostname =
-    type === "service"
-      ? (
-          serviceState ??
-          ctx.serviceProxy.projectWorkspaceService({
-            projectSlug: ctx.projectSlug,
-            branchName: ctx.branchName,
-            scriptName: runtimeEntry.scriptName,
-            daemonPort: ctx.daemonPort,
-            publicBaseUrl: ctx.serviceProxyPublicBaseUrl,
-          })
-        ).hostname
-      : runtimeEntry.scriptName;
-  const urls =
-    serviceState ??
-    ctx.serviceProxy.projectUrls({
-      projectSlug: ctx.projectSlug,
-      branchName: ctx.branchName,
-      scriptName: runtimeEntry.scriptName,
-      daemonPort: ctx.daemonPort,
-      publicBaseUrl: ctx.serviceProxyPublicBaseUrl,
-    });
+  let hostname = runtimeEntry.scriptName;
+  if (type === "service") {
+    hostname = serviceState
+      ? serviceState.hostname
+      : ctx.serviceProxy.projectWorkspaceService({
+          projectSlug: ctx.projectSlug,
+          branchName: ctx.branchName,
+          scriptName: runtimeEntry.scriptName,
+          daemonPort: ctx.daemonPort,
+          publicBaseUrl: ctx.serviceProxyPublicBaseUrl,
+        }).hostname;
+  }
+  const urls: ServiceProxyUrlProjection = serviceState
+    ? serviceState
+    : ctx.serviceProxy.projectUrls({
+        projectSlug: ctx.projectSlug,
+        branchName: ctx.branchName,
+        scriptName: runtimeEntry.scriptName,
+        daemonPort: ctx.daemonPort,
+        publicBaseUrl: ctx.serviceProxyPublicBaseUrl,
+      });
 
   return {
     scriptName: runtimeEntry.scriptName,

@@ -1,13 +1,13 @@
-import { Ajv } from "ajv";
 import { z } from "zod";
 import type { SessionMessageInfo } from "@opencode/client";
+import { createJsonSchemaCompiler } from "../../../json-schema-validator.js";
 
 export const STRUCTURED_OUTPUT_TOOL = "paseo_structured_output";
-const schemas = new Ajv({ strict: false, allErrors: true });
+const schemas = createJsonSchemaCompiler();
 
 export function structuredOutput(input: unknown) {
   const schema = z.union([z.boolean(), z.record(z.string(), z.json())]).parse(input);
-  const validate = schemas.compile(schema);
+  const compiled = schemas.compile(schema);
   return {
     schema,
     assert(history: SessionMessageInfo[]) {
@@ -23,10 +23,9 @@ export function structuredOutput(input: unknown) {
             continue;
           const result = part.state.metadata?.paseoStructuredOutput;
           if (result === undefined) continue;
-          if (!validate(result))
-            throw new Error(
-              `Invalid OpenCode structured output: ${schemas.errorsText(validate.errors)}`,
-            );
+          const errors = compiled.validate(result);
+          if (errors.length > 0)
+            throw new Error(`Invalid OpenCode structured output: ${schemas.errorsText(errors)}`);
           return;
         }
       }

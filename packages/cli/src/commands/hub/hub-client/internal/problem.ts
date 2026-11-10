@@ -78,10 +78,13 @@ function formatFieldIssues(
     });
     return lines.length === 0 ? undefined : lines.join("\n");
   }
-  if (errors === undefined) return undefined;
-  const lines = Object.entries(errors).flatMap(([field, messages]) =>
-    messages.map((message: string) => `${field}: ${message}`),
-  );
+  if (errors === undefined || Array.isArray(errors)) return undefined;
+  const lines: string[] = [];
+  for (const field of Object.keys(errors)) {
+    const messages = errors[field];
+    if (!messages) continue;
+    for (const message of messages) lines.push(`${field}: ${message}`);
+  }
   return lines.length === 0 ? undefined : lines.join("\n");
 }
 

@@ -85,7 +85,18 @@ export class CreationClient {
         relativeCwd ?? relativeDirectory(agent.config!.cwd, workspace.workspace.projectRootPath)
       }`;
       const created = await this.legacyAgent({
-        ...agent,
+        agentId: agent.agentId,
+        provider: agent.provider,
+        initialPrompt: agent.initialPrompt,
+        images: agent.images,
+        attachments: agent.attachments,
+        env: agent.env,
+        callerAgentId: agent.callerAgentId,
+        clientMessageId: agent.clientMessageId,
+        outputSchema: agent.outputSchema,
+        autoArchive: agent.autoArchive,
+        background: agent.background,
+        labels: agent.labels,
         config: { ...agent.config!, cwd },
         workspaceId: workspace.workspace.id,
         idempotencyKey: `${operation.key}:agent`,

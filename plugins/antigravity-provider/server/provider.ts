@@ -155,7 +155,8 @@ function createConnection(
         })
         .catch((error) => failed(input, error));
     },
-    onEvent(listener) {
+    // Typed explicitly: scriptc loses the contextual type of an object-literal method parameter.
+    onEvent(listener: (event: ProviderEvent) => void) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },

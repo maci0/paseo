@@ -192,7 +192,12 @@ const OmpToolResultObjectSchema = z
   })
   .passthrough();
 
-const OmpToolResultSchema = z.union([z.string(), OmpToolResultObjectSchema, z.null()]);
+// Typed as OmpToolResult so scriptc need not map the inferred passthrough shapes onto it.
+const OmpToolResultSchema: z.ZodType<OmpToolResult> = z.union([
+  z.string(),
+  OmpToolResultObjectSchema,
+  z.null(),
+]);
 
 const BashToolInputSchema: z.ZodType<BashToolInput> = z.object({
   command: z.string(),

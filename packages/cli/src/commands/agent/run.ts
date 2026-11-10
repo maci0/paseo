@@ -441,8 +441,10 @@ function loadRunImages(
     const resolvedPath = resolve(imagePath);
     try {
       const imageData = readFileSync(resolvedPath);
-      const mimeType = lookup(resolvedPath) || "application/octet-stream";
-      if (!mimeType.startsWith("image/")) {
+      const detected = lookup(resolvedPath);
+      const mimeType = typeof detected === "string" ? detected : "application/octet-stream";
+      const imagePrefix = mimeType.substring(0, 6);
+      if (imagePrefix !== "image/") {
         throw new Error(`File is not an image: ${imagePath} (detected type: ${mimeType})`);
       }
       return {

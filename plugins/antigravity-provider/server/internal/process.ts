@@ -50,12 +50,17 @@ function driverArgs(options: DriverOptions): string[] {
 }
 
 export function startDriver(options: DriverOptions): Driver {
-  const child = spawnProcess(options.launch.command, driverArgs(options), {
-    cwd: options.config.cwd,
-    env: { ...options.launch.env, ...options.config.env },
-    detached: process.platform !== "win32",
-    stdio: "pipe",
-  });
+  // Declared: scriptc cannot lower the stream calls on the type inferred from spawnProcess().
+  const child: ChildProcessWithoutNullStreams = spawnProcess(
+    options.launch.command,
+    driverArgs(options),
+    {
+      cwd: options.config.cwd,
+      env: { ...options.launch.env, ...options.config.env },
+      detached: process.platform !== "win32",
+      stdio: "pipe",
+    },
+  );
   const lines = createInterface({ input: child.stdout });
   let cleanup = Promise.resolve();
   let stderr = "";
@@ -184,12 +189,17 @@ interface ProbeOptions {
 }
 export function probe(options: ProbeOptions): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawnProcess(options.launch.command, [...options.launch.args, ...options.args], {
-      env: options.launch.env,
-      cwd: options.cwd,
-      stdio: "pipe",
-      detached: process.platform !== "win32",
-    });
+    // Declared: scriptc cannot lower the stream calls on the type inferred from spawnProcess().
+    const child: ChildProcessWithoutNullStreams = spawnProcess(
+      options.launch.command,
+      [...options.launch.args, ...options.args],
+      {
+        env: options.launch.env,
+        cwd: options.cwd,
+        stdio: "pipe",
+        detached: process.platform !== "win32",
+      },
+    );
     let stdout = "";
     let stderr = "";
     const deadline = setTimeout(() => {

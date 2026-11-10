@@ -180,7 +180,10 @@ type RegistryRecord = PersistedProjectRecord | PersistedWorkspaceRecord;
 class FileBackedRegistry<TRecord extends RegistryRecord> {
   private readonly filePath: string;
   protected readonly logger: Logger;
-  private readonly schema: z.ZodType<TRecord, unknown>;
+  // Parse functions instead of the schema: scriptc rejects a ZodType-typed field on a generic
+  // class.
+  private readonly parseRecord: (value: unknown) => TRecord;
+  private readonly parseRecords: (value: unknown) => TRecord[];
   private readonly getId: (record: TRecord) => string;
   private loaded = false;
   private readonly cache = new Map<string, TRecord>();
@@ -197,7 +200,9 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     writeRecords?: (filePath: string, records: readonly TRecord[]) => Promise<void>;
   }) {
     this.filePath = options.filePath;
-    this.schema = options.schema;
+    const schema = options.schema;
+    this.parseRecord = (value) => schema.parse(value);
+    this.parseRecords = (value) => z.array(schema).parse(value);
     this.getId = options.getId;
     this.logger = options.logger.child({
       module: "workspace-registry",
@@ -230,7 +235,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
   }
 
   async upsert(record: TRecord): Promise<void> {
-    const parsed = this.schema.parse(record);
+    const parsed = this.parseRecord(record);
     await this.mutateCache((records) => {
       records.set(this.getId(parsed), parsed);
       return undefined;
@@ -241,7 +246,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     return this.mutateCache((records) => {
       const existing = records.get(id);
       if (!existing) return null;
-      const next = this.schema.parse(updater(existing));
+      const next = this.parseRecord(updater(existing));
       records.set(id, next);
       return next;
     });
@@ -251,7 +256,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     return this.mutateCache((records) => {
       const existing = records.get(id);
       if (!existing || existing.archivedAt) return null;
-      const next = this.schema.parse({ ...existing, updatedAt: archivedAt, archivedAt });
+      const next = this.parseRecord({ ...existing, updatedAt: archivedAt, archivedAt });
       records.set(id, next);
       return next;
     });
@@ -278,7 +283,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     this.cache.clear();
     try {
       const raw = await fs.readFile(this.filePath, "utf8");
-      const parsed = z.array(this.schema).parse(JSON.parse(raw));
+      const parsed = this.parseRecords(JSON.parse(raw));
       for (const record of parsed) {
         this.cache.set(this.getId(record), record);
       }
@@ -297,7 +302,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     return this.mutateCache((records) => {
       const changed = updater(records);
       if (changed.length === 0) return [];
-      const parsed = changed.map((record) => this.schema.parse(record));
+      const parsed = changed.map((record) => this.parseRecord(record));
       for (const record of parsed) records.set(this.getId(record), record);
       return parsed;
     });

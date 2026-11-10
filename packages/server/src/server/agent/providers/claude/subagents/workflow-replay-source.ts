@@ -5,7 +5,7 @@ import { normalizeProviderReplayTimestamp } from "../../../provider-history-time
 import type { ProviderSubagentStatus } from "../../../provider-subagents/store.js";
 import type { SubagentObservation } from "./observation.js";
 import { buildClaudeSubagentSubtitle } from "./presentation.js";
-import type { ClaudeReplayEntry } from "./replay-source.js";
+import { replayEntries, type ClaudeReplayEntry } from "./replay-source.js";
 import { formatClaudeWorkflowResult } from "./workflow-output.js";
 
 const ClaudeWorkflowRunSchema = z.object({
@@ -45,14 +45,15 @@ export function parseClaudeWorkflowRun(contents: string): ClaudeWorkflowRun | nu
  * provider runtime was recreated, so replay terminalizes it as failed instead of resurrecting a
  * row that can never receive another update.
  */
-export async function observeReplayWorkflows(input: {
+// Generic over the map's value type: scriptc cannot read a map whose value type is widened to
+// the iterable union at the call.
+export async function observeReplayWorkflows<
+  TEntries extends Iterable<ClaudeReplayEntry> | AsyncIterable<ClaudeReplayEntry>,
+>(input: {
   workflows: readonly ClaudeWorkflowRun[];
   parentEntries: Iterable<ClaudeWorkflowParentEntry> | AsyncIterable<ClaudeWorkflowParentEntry>;
   /** Repeatable entries in chronological order, supplied by the transcript reader. */
-  entriesByRunId?: ReadonlyMap<
-    string,
-    Iterable<ClaudeReplayEntry> | AsyncIterable<ClaudeReplayEntry>
-  >;
+  entriesByRunId?: ReadonlyMap<string, TEntries>;
   convertEntry?: (entry: ClaudeReplayEntry) => AgentTimelineItem[] | Promise<AgentTimelineItem[]>;
 }): Promise<SubagentObservation[]> {
   const toolCallIdByRunId = await readWorkflowLinks(input.parentEntries);
@@ -128,7 +129,7 @@ async function observeWorkflowTimeline(input: {
   const observations: SubagentObservation[] = [];
   const replayedAssistantText = new Set<string>();
 
-  for await (const entry of input.entries) {
+  for await (const entry of replayEntries(input.entries)) {
     const timestamp = normalizeProviderReplayTimestamp(entry.timestamp);
     const items = (await input.convertEntry?.(entry)) ?? [];
     for (const item of items) {

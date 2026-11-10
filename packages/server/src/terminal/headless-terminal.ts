@@ -1,5 +1,9 @@
 import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
-import xterm, { type Terminal } from "@xterm/headless";
+import xterm, {
+  type ITerminalInitOnlyOptions,
+  type ITerminalOptions,
+  type Terminal,
+} from "@xterm/headless";
 
 export interface HeadlessTerminalOptions {
   rows: number;
@@ -16,7 +20,14 @@ export interface HeadlessTerminalOptions {
  * up after reconnect. See docs/terminal-rendering.md.
  */
 export function createHeadlessTerminal(options: HeadlessTerminalOptions): Terminal {
-  const terminal = new xterm.Terminal({ ...options, allowProposedApi: true });
+  // Named fields instead of a spread: scriptc cannot spread an interface-typed object.
+  const terminalOptions: ITerminalOptions & ITerminalInitOnlyOptions = {
+    rows: options.rows,
+    cols: options.cols,
+    allowProposedApi: true,
+  };
+  if (options.scrollback !== undefined) terminalOptions.scrollback = options.scrollback;
+  const terminal = new xterm.Terminal(terminalOptions);
   terminal.loadAddon(new UnicodeGraphemesAddon());
   return terminal;
 }

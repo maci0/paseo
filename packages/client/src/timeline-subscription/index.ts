@@ -64,12 +64,14 @@ export function subscribeTimeline(
     },
     error: fail,
   });
-  const subscription: TimelineSubscription = Object.assign(stop, {
+  const subscription: TimelineSubscription = {
+    stop,
     ready: observation.ready.then(() => undefined),
     release,
-    subscriptionId: null,
-  });
-  Object.defineProperty(subscription, "subscriptionId", { get: () => observation.subscriptionId });
+    get subscriptionId() {
+      return observation.subscriptionId;
+    },
+  };
   void subscription.ready.catch(fail);
   return subscription;
 }

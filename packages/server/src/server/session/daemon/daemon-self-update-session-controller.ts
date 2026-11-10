@@ -10,9 +10,9 @@ import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 
 type DaemonUpdateRequest = Extract<SessionInboundMessage, { type: "daemon.update.request" }>;
 
-const DAEMON_SELF_UPDATE_MESSAGE_TYPES: ReadonlySet<SessionInboundMessage["type"]> = new Set([
-  "daemon.update.request",
-]);
+const DAEMON_SELF_UPDATE_MESSAGE_TYPES: ReadonlySet<SessionInboundMessage["type"]> = new Set<
+  SessionInboundMessage["type"]
+>(["daemon.update.request"]);
 
 interface DaemonSelfUpdateRestartIntent {
   type: "restart";

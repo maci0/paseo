@@ -1,8 +1,8 @@
-import { EventEmitter } from "node:events";
 import { createConnection } from "node:net";
 import { attachFramedSocket, type FramedSocket } from "./terminal-worker-frames.js";
 import {
   TERMINAL_WORKER_PROTOCOL_VERSION,
+  decodeTerminalWorkerToParentMessage,
   type TerminalWorkerHello,
   type TerminalWorkerHelloAck,
   type TerminalWorkerRequest,
@@ -18,8 +18,8 @@ export interface TerminalWorkerConnection {
   send(message: TerminalWorkerRequest, callback: (error: Error | null) => void): boolean;
   /** Closes the socket. The worker keeps running and keeps its terminals. */
   disconnect(): void;
-  on(event: "message", listener: (message: TerminalWorkerToParentMessage) => void): this;
-  on(event: "close", listener: () => void): this;
+  onMessage(listener: (message: TerminalWorkerToParentMessage) => void): void;
+  onClose(listener: () => void): void;
 }
 
 export class TerminalWorkerConnectError extends Error {
@@ -29,19 +29,30 @@ export class TerminalWorkerConnectError extends Error {
   }
 }
 
-class SocketTerminalWorkerConnection extends EventEmitter implements TerminalWorkerConnection {
+// Keeps its own listener lists: a scriptc binary does not reach EventEmitter methods through
+// an interface the subclass implements.
+class SocketTerminalWorkerConnection implements TerminalWorkerConnection {
   readonly workerPid: number;
   private readonly framed: FramedSocket;
   private closed = false;
+  private readonly messageListeners: Array<(message: TerminalWorkerToParentMessage) => void> = [];
+  private readonly closeListeners: Array<() => void> = [];
 
   constructor(framed: FramedSocket, workerPid: number) {
-    super();
     this.framed = framed;
     this.workerPid = workerPid;
     framed.socket.once("close", () => {
       this.closed = true;
-      this.emit("close");
+      for (const listener of this.closeListeners.slice()) listener();
     });
+  }
+
+  onMessage(listener: (message: TerminalWorkerToParentMessage) => void): void {
+    this.messageListeners.push(listener);
+  }
+
+  onClose(listener: () => void): void {
+    this.closeListeners.push(listener);
   }
 
   get connected(): boolean {
@@ -57,7 +68,7 @@ class SocketTerminalWorkerConnection extends EventEmitter implements TerminalWor
   }
 
   deliver(message: TerminalWorkerToParentMessage): void {
-    this.emit("message", message);
+    for (const listener of this.messageListeners.slice()) listener(message);
   }
 }
 
@@ -98,30 +109,35 @@ export function connectTerminalWorker(input: {
         ),
       );
     }, timeoutMs);
-    const framed = attachFramedSocket(socket, (message) => {
-      if (connection) {
-        connection.deliver(message as TerminalWorkerToParentMessage);
-        return;
-      }
-      if (!isHelloAck(message)) {
-        fail(new TerminalWorkerConnectError("Terminal worker sent an unexpected first frame"));
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      connection = new SocketTerminalWorkerConnection(framed, message.pid);
-      resolve(connection);
-    });
-    // `on`, not `once`: an error after authentication must not go unhandled. `close`
-    // follows every socket error and ends the connection.
-    socket.on("error", (error) => {
+    const onSocketError = (error: Error): void => {
       fail(
         new TerminalWorkerConnectError(
           `Cannot connect to terminal worker at ${input.socketPath}: ${error.message}`,
           { cause: error },
         ),
       );
-    });
+    };
+    const framed = attachFramedSocket(
+      socket,
+      (message) => {
+        if (connection) {
+          connection.deliver(decodeTerminalWorkerToParentMessage(message));
+          return;
+        }
+        if (!isHelloAck(message)) {
+          fail(new TerminalWorkerConnectError("Terminal worker sent an unexpected first frame"));
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        connection = new SocketTerminalWorkerConnection(framed, message.pid);
+        resolve(connection);
+      },
+      onSocketError,
+    );
+    // `on`, not `once`: an error after authentication must not go unhandled. `close`
+    // follows every socket error and ends the connection.
+    socket.on("error", onSocketError);
     socket.once("close", () => {
       fail(
         new TerminalWorkerConnectError(

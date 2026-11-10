@@ -88,7 +88,7 @@ export interface ImportProviderSessionResult {
   createdWorkspace: PersistedWorkspaceRecord | null;
 }
 
-interface ImportedProviderSession {
+export interface ImportedProviderSession {
   snapshot: ManagedAgent;
   timelineSize: number;
 }
@@ -120,9 +120,9 @@ export async function listImportableProviderSessions(
   input: ListImportableProviderSessionsInput,
 ): Promise<ListImportableProviderSessionsResult> {
   const { request, agentManager, agentStorage, providerSnapshotManager } = input;
-  const limit = request.limit ?? 20;
+  const limit: number = request.limit ?? 20;
   const sinceTimestamp = parseRecentProviderSessionsSince(request.since);
-  const providerFilter = request.providers ? new Set(request.providers) : undefined;
+  const providerFilter = request.providers ? new Set<string>(request.providers) : undefined;
   const importedSessions = await collectImportedProviderSessions(
     agentManager,
     agentStorage,

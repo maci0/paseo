@@ -123,7 +123,8 @@ export class SessionTurns {
     return turn;
   }
   async startTurn(prompt: AgentPromptInput, options?: AgentRunOptions) {
-    await this.stopping;
+    // scriptc cannot await a nullable promise; Promise.resolve() takes the same one tick as await null.
+    await (this.stopping ?? Promise.resolve());
     if (this.options.signal.aborted) throw new Error("OpenCode session is closed");
     if (this.turn) throw new Error("OpenCode session already has an active turn");
     const input = this.promptInput(prompt);

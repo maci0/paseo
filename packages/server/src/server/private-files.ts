@@ -35,7 +35,8 @@ export function writePrivateFileAtomicSync(
     `.${path.basename(destination)}.${process.pid}.${randomUUID()}`,
   );
   try {
-    writeFileSync(temporary, data, { mode: PRIVATE_FILE_MODE });
+    writeFileSync(temporary, data);
+    chmodSync(temporary, PRIVATE_FILE_MODE);
     renameSync(temporary, destination);
     ensurePrivateFile(destination);
   } catch (error) {

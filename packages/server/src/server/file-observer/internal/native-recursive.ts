@@ -1,9 +1,10 @@
-import { type Dirent, watch } from "node:fs";
+import type { Dirent } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { BackendDiagnostics, ObservationBackend, ObservationHost } from "./contracts.js";
 import type { ObserverPaths } from "./paths.js";
 import { isMissingPathError, toError } from "./paths.js";
+import { watchRecursive } from "./recursive-watch.js";
 
 const MAX_TRACKED_ENTRIES = 250_000;
 // fs.stat runs on the libuv threadpool, which is four threads and shared by the
@@ -39,8 +40,15 @@ type WatchDirectory = (
   on(event: "error", listener: (error: Error) => void): unknown;
 };
 
-const watchDirectory: WatchDirectory = (root, listener) =>
-  watch(root, { recursive: true }, listener);
+const watchDirectory: WatchDirectory = (root, listener) => {
+  // A scriptc binary has no recursive fs.watch; the failed observation degrades to polling.
+  if (process.argv[0] === "scriptc") {
+    throw new Error(
+      "Recursive file watching is not available in the native build on this platform",
+    );
+  }
+  return watchRecursive(root, listener);
+};
 
 export function createNativeRecursiveBackend(
   host: ObservationHost,
@@ -141,7 +149,8 @@ class NativeRecursiveBackend implements ObservationBackend {
   private async finishClose(): Promise<void> {
     await this.reconcileTail;
     this.classificationQueue.length = 0;
-    await Promise.allSettled(this.classifications);
+    // scriptc lowers Promise.allSettled over an array, not a Set.
+    await Promise.allSettled(Array.from(this.classifications));
     this.watcher?.close();
     this.watcher = null;
     this.files.clear();

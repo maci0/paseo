@@ -71,11 +71,10 @@ export function createHubCommand(overrides: Partial<HubCommandEnvironment> = {})
     reporter: environment.reporter,
   });
   addJsonAndDaemonHostOptions(hub.command("status")).action(
-    withOutput(async (...args) => {
-      const options = args.at(-2) as {
-        host?: string;
-        daemonTarget: import("../../utils/daemon-target.js").DaemonTarget;
-      };
+    withOutput(async (options: {
+      host?: string;
+      daemonTarget: import("../../utils/daemon-target.js").DaemonTarget;
+    } = { daemonTarget: { kind: "instance", home: "" } }) => {
       return withHubDaemon(environment.daemon, options.daemonTarget, async (client) =>
         hubStatusResult((await client.getHubStatus()).status),
       );

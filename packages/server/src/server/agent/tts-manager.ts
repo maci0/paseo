@@ -323,7 +323,8 @@ export class TTSManager {
   }
 
   private destroySpeechStream(stream: Readable): void {
-    if (typeof stream.destroy === "function" && !stream.destroyed) {
+    // Every Readable has destroy; scriptc cannot read a method as a value for a typeof check.
+    if (!stream.destroyed) {
       stream.destroy();
     }
   }

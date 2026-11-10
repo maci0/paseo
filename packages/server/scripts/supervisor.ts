@@ -1,13 +1,37 @@
-import { fork, spawn, type ChildProcess } from "child_process";
-import path from "node:path";
+import { fork, type ChildProcess } from "child_process";
 import {
-  createStream as createRotatingFileStream,
-  type RotatingFileStream,
-} from "rotating-file-stream";
-import { signalProcessTree } from "../src/utils/tree-kill.js";
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+import path from "node:path";
+// URL comes from node:url, not the global: once a `/// <reference lib="dom" />` enters the
+// program (the @xterm typings the terminal reaper reaches carry one), the global URL is the
+// DOM declaration, and scriptc then calls the embedded worker's fork path runtime-valued.
+import { URL, fileURLToPath } from "node:url";
+import { signalProcessTree, treeKillTargetForChild } from "../src/utils/tree-kill.js";
+import { launchNodeWorker, type WorkerSpawnSpec } from "./supervisor-node-launch.js";
 
 const WORKER_HEARTBEAT_INTERVAL_MS = 1_000;
 const WORKER_TERMINATION_GRACE_MS = 10_000;
+const LOG_ROTATE_DEFAULT_UNIT = "M";
+const LOG_ROTATE_UNIT_BYTES: Record<string, number> = {
+  B: 1,
+  K: 1024,
+  M: 1024 * 1024,
+  G: 1024 * 1024 * 1024,
+};
+const LOG_ROTATED_NAME_ATTEMPTS = 1000;
+
+// A scriptc executable reports "scriptc" as argv[0]; Node reports its own path.
+const RUNNING_AS_SCRIPTC_BINARY = process.argv[0] === "scriptc";
 
 interface SupervisorLogFileOptions {
   path: string;
@@ -53,11 +77,7 @@ interface SupervisorOptions {
   workerArgs?: string[];
   workerEnv?: NodeJS.ProcessEnv;
   workerExecArgv?: string[];
-  resolveWorkerSpawnSpec?: (workerEntry: string) => {
-    command: string;
-    args: string[];
-    env?: NodeJS.ProcessEnv;
-  } | null;
+  resolveWorkerSpawnSpec?: (workerEntry: string) => WorkerSpawnSpec | null;
   onWorkerReady?: (message: { listen: string; serverId: string }) => Promise<void> | void;
   onWorkerExit?: () => Promise<void> | void;
   restartOnCrash?: boolean;
@@ -111,46 +131,168 @@ function parseLifecycleMessage(msg: unknown): WorkerLifecycleMessage | null {
   return null;
 }
 
-function toRotatingFileStreamSize(size: string): string {
-  const trimmed = size.trim();
-  const match = trimmed.match(/^(\d+)\s*([bBkKmMgG])?$/);
-  if (!match) {
-    return trimmed;
-  }
+// daemon.log rotation reproduces rotating-file-stream 3.2.9 called with { size, maxFiles }
+// (scriptc cannot compile that package): the same size grammar and errors, rotation after
+// the write that reaches the size, rotated copies named YYYYMMDD-HHMM-NN-<name> in local
+// time, and a <name>.txt history from which the oldest copies beyond maxFiles are deleted.
+// Writes are synchronous where the package wrote asynchronously.
 
-  const value = match[1];
-  const unit = (match[2] ?? "M").toUpperCase();
-  return `${value}${unit}`;
+function parseLogRotateSize(size: string): number {
+  const trimmed = size.trim();
+  const shorthand = trimmed.match(/^(\d+)\s*([bBkKmMgG])?$/);
+  const value = shorthand
+    ? `${shorthand[1]}${(shorthand[2] ?? LOG_ROTATE_DEFAULT_UNIT).toUpperCase()}`
+    : trimmed;
+  const num = Number.parseInt(value, 10);
+  if (Number.isNaN(num)) {
+    throw new Error(`Unknown 'options.size' format: ${value}`);
+  }
+  if (num <= 0) {
+    throw new Error("A positive integer number is expected for 'options.size'");
+  }
+  const digits = String(num).length;
+  const unit = value.replace(/^[ 0]*/g, "").slice(digits, digits + 1);
+  if (unit.length === 0) {
+    throw new Error("Missing unit for 'options.size'");
+  }
+  const bytes = LOG_ROTATE_UNIT_BYTES[unit];
+  if (bytes === undefined) {
+    throw new Error(`Unknown 'options.size' unit: ${unit}`);
+  }
+  return num * bytes;
+}
+
+function checkLogRotateMaxFiles(maxFiles: number): void {
+  if (!Number.isInteger(maxFiles) || maxFiles <= 0) {
+    throw new Error("'maxFiles' option must be a positive integer number");
+  }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
+}
+
+function padTwo(value: number): string {
+  return (value > 9 ? "" : "0") + String(value);
+}
+
+function rotatedLogPath(logPath: string, time: Date, index: number): string {
+  const stamp =
+    `${time.getFullYear()}${padTwo(time.getMonth() + 1)}${padTwo(time.getDate())}` +
+    `-${padTwo(time.getHours())}${padTwo(time.getMinutes())}`;
+  return `${path.dirname(logPath)}${path.sep}${stamp}-${padTwo(index)}-${path.basename(logPath)}`;
+}
+
+function pruneRotatedLogs(logPath: string, rotatedPath: string, maxFiles: number): void {
+  const historyPath = `${logPath}.txt`;
+  let names = [rotatedPath];
+  try {
+    names = [...readFileSync(historyPath, "utf8").split("\n"), rotatedPath];
+  } catch (error) {
+    if (!isMissingFileError(error)) {
+      throw error;
+    }
+  }
+  const kept: { name: string; time: number }[] = [];
+  for (const name of names) {
+    if (!name) {
+      continue;
+    }
+    try {
+      const stats = statSync(name);
+      if (stats.isFile()) {
+        kept.push({ name, time: stats.mtime.getTime() });
+      }
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        throw error;
+      }
+    }
+  }
+  kept.sort((a, b) => a.time - b.time);
+  while (kept.length > maxFiles) {
+    const oldest = kept.shift();
+    if (oldest) {
+      unlinkQuietly(oldest.name);
+    }
+  }
+  writeFileSync(historyPath, `${kept.map((entry) => entry.name).join("\n")}\n`, "utf8");
+}
+
+function unlinkQuietly(filePath: string): void {
+  try {
+    unlinkSync(filePath);
+  } catch (error) {
+    if (!isMissingFileError(error)) {
+      throw error;
+    }
+  }
+}
+
+function rotateLogFile(logPath: string, maxFiles: number): void {
+  const rotation = new Date();
+  for (let index = 1; index < LOG_ROTATED_NAME_ATTEMPTS; index += 1) {
+    const rotatedPath = rotatedLogPath(logPath, rotation, index);
+    if (existsSync(rotatedPath)) {
+      continue;
+    }
+    closeSync(openSync(rotatedPath, "a"));
+    unlinkQuietly(rotatedPath);
+    renameSync(logPath, rotatedPath);
+    pruneRotatedLogs(logPath, rotatedPath, maxFiles);
+    return;
+  }
+  throw new Error("Too many destination file attempts");
+}
+
+interface OpenLogFile {
+  fd: number;
+  size: number;
 }
 
 // daemon.log is best effort: a full disk or a replaced log path must not take the
-// supervisor, and with it the worker, down. A failed stream is dropped and a new one
-// is opened on the next write, so logging resumes once the file is writable again.
+// supervisor, and with it the worker, down. A failed file is dropped and opened again on
+// the next write, so logging resumes once the file is writable again. An invalid rotate
+// size or maxFiles throws from the first write, as rotating-file-stream did.
 function createDurableLog(
   options: SupervisorLogFileOptions | undefined,
   reportFailure: (message: string) => void,
 ) {
-  let stream: RotatingFileStream | null = null;
+  let file: OpenLogFile | null = null;
   let failing = false;
 
-  const open = (logFile: SupervisorLogFileOptions): RotatingFileStream => {
-    const next = createRotatingFileStream(path.basename(logFile.path), {
-      path: path.dirname(logFile.path),
-      size: toRotatingFileStreamSize(logFile.rotate.maxSize),
-      maxFiles: logFile.rotate.maxFiles,
-    });
-    next.on("error", (error) => {
-      if (stream === next) {
-        stream = null;
+  const open = (logPath: string, sizeLimit: number, maxFiles: number): OpenLogFile => {
+    mkdirSync(path.dirname(logPath), { recursive: true });
+    let size = 0;
+    try {
+      const stats = statSync(logPath);
+      if (!stats.isFile()) {
+        throw new Error(`Can't write on: ${logPath} (it is not a file)`);
       }
-      if (!failing) {
-        failing = true;
-        reportFailure(
-          `Cannot write ${logFile.path}, will retry on the next log line: ${error.message}`,
-        );
+      size = stats.size;
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        throw error;
       }
-    });
-    return next;
+    }
+    if (size >= sizeLimit) {
+      rotateLogFile(logPath, maxFiles);
+      size = 0;
+    }
+    return { fd: openSync(logPath, "a"), size };
+  };
+
+  const closeQuietly = (): void => {
+    if (!file) {
+      return;
+    }
+    const { fd } = file;
+    file = null;
+    try {
+      closeSync(fd);
+    } catch {
+      // The descriptor is already unusable; the next write opens a new one.
+    }
   };
 
   return {
@@ -158,21 +300,33 @@ function createDurableLog(
       if (!options) {
         return;
       }
-      stream ??= open(options);
-      stream.write(chunk, (error) => {
-        if (!error) {
-          failing = false;
+      const sizeLimit = parseLogRotateSize(options.rotate.maxSize);
+      checkLogRotateMaxFiles(options.rotate.maxFiles);
+      try {
+        file ??= open(options.path, sizeLimit, options.rotate.maxFiles);
+        const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+        file.size += bytes.length;
+        writeSync(file.fd, bytes);
+        if (file.size >= sizeLimit) {
+          closeQuietly();
+          rotateLogFile(options.path, options.rotate.maxFiles);
+          file = open(options.path, sizeLimit, options.rotate.maxFiles);
         }
-      });
+        failing = false;
+      } catch (error) {
+        closeQuietly();
+        if (!failing) {
+          failing = true;
+          const message = error instanceof Error ? error.message : String(error);
+          reportFailure(
+            `Cannot write ${options.path}, will retry on the next log line: ${message}`,
+          );
+        }
+      }
     },
     close(): Promise<void> {
-      return new Promise((resolve) => {
-        if (!stream) {
-          resolve();
-          return;
-        }
-        stream.end(() => resolve());
-      });
+      closeQuietly();
+      return Promise.resolve();
     },
   };
 }
@@ -184,6 +338,20 @@ function ignoreClosedOutput(error: NodeJS.ErrnoException): void {
   if (error.code !== "EPIPE") {
     throw error;
   }
+}
+
+// Native path. scriptc embeds the module a build-time fork() path names and starts it by
+// re-executing the binary, with the same newline-delimited JSON IPC channel the worker
+// already uses. Worker resolution, execArgv and the Electron runner do not apply.
+function launchEmbeddedWorker(workerArgs: string[], workerEnv: NodeJS.ProcessEnv): ChildProcess {
+  return fork(
+    fileURLToPath(new URL("../src/server/daemon-worker.ts", import.meta.url)),
+    workerArgs,
+    {
+      stdio: ["inherit", "pipe", "pipe", "ipc"],
+      env: workerEnv,
+    },
+  );
 }
 
 export function runSupervisor(options: SupervisorOptions): SupervisorController {
@@ -292,7 +460,7 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
           workerPid: currentChild.pid ?? null,
         },
       );
-      void signalProcessTree(currentChild, "SIGKILL").catch((error) => {
+      void signalProcessTree(treeKillTargetForChild(currentChild), "SIGKILL").catch((error) => {
         writeLifecycleLog("Failed to force-kill worker process tree", {
           error: error instanceof Error ? error.message : String(error),
           supervisorPid: process.pid,
@@ -315,19 +483,13 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
       return;
     }
 
-    const spawnSpec = resolveWorkerSpawnSpec?.(workerEntry) ?? null;
-    writeLifecycleLog("Spawning worker", { workerEntry });
-    if (spawnSpec) {
-      child = spawn(spawnSpec.command, spawnSpec.args, {
-        stdio: ["inherit", "pipe", "pipe", "ipc"],
-        env: spawnSpec.env ?? workerEnv,
-      });
+    if (RUNNING_AS_SCRIPTC_BINARY) {
+      writeLifecycleLog("Spawning worker", { workerEntry: "embedded daemon-worker" });
+      child = launchEmbeddedWorker(workerArgs, workerEnv);
     } else {
-      child = fork(workerEntry, workerArgs, {
-        stdio: ["inherit", "pipe", "pipe", "ipc"],
-        env: workerEnv,
-        execArgv: workerExecArgv,
-      });
+      const spawnSpec = resolveWorkerSpawnSpec?.(workerEntry) ?? null;
+      writeLifecycleLog("Spawning worker", { workerEntry });
+      child = launchNodeWorker({ workerEntry, workerArgs, workerEnv, workerExecArgv, spawnSpec });
     }
 
     const currentChild = child;
@@ -338,9 +500,7 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
       if (currentChild.connected) {
         currentChild.send?.(message, (error) => {
           if (error) {
-            writeLifecycleLog("Worker heartbeat IPC send failed", {
-              error: error instanceof Error ? error.message : String(error),
-            });
+            writeLifecycleLog("Worker heartbeat IPC send failed", { error: error.message });
           }
         });
       } else {
@@ -499,7 +659,7 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
     currentChild.send?.(message, (error) => {
       if (error) {
         writeLifecycleLog("Graceful worker shutdown IPC send failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: error.message,
           reason,
           supervisorPid: process.pid,
           workerPid: currentChild.pid ?? null,

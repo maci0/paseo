@@ -47,13 +47,23 @@ export interface AgentHookPluginFileInstallStrategy extends AgentHookInstallStra
   source: string;
 }
 
+/**
+ * The provider fields a config format reads. Not `AgentHookProvider` itself: scriptc cannot lower
+ * that type's recursion through `install.format`.
+ */
+export interface AgentHookFormatProvider {
+  id: string;
+  events: AgentHookEventDefinition[];
+  install: { hookMarker: string };
+}
+
 export interface AgentHookConfigFormat<TConfig> {
   empty(): TConfig;
   parse(raw: string): TConfig;
   stringify(config: TConfig): string;
-  install(config: TConfig, provider: AgentHookProvider<TConfig>): TConfig;
-  uninstall(config: TConfig, provider: AgentHookProvider<TConfig>): TConfig;
-  isInstalled(config: TConfig, provider: AgentHookProvider<TConfig>): boolean;
+  install(config: TConfig, provider: AgentHookFormatProvider): TConfig;
+  uninstall(config: TConfig, provider: AgentHookFormatProvider): TConfig;
+  isInstalled(config: TConfig, provider: AgentHookFormatProvider): boolean;
 }
 
 export interface AgentHookInstallOptions {
@@ -75,24 +85,40 @@ export function installAgentHooks<TConfig>(
   provider: AgentHookProvider<TConfig>,
   options: AgentHookInstallOptions = {},
 ): AgentHookInstallResult {
-  if (provider.install.kind === "plugin-file") {
-    return installAgentHookPluginFile(provider.install, options);
+  const install: AgentHookInstallStrategy<TConfig> = provider.install;
+  if (install.kind === "plugin-file") {
+    return installAgentHookPluginFile(install, options);
   }
 
-  const format = provider.install.format;
-  return updateAgentHookConfig(provider, options, (config) => format.install(config, provider));
+  const format = install.format;
+  const formatProvider: AgentHookFormatProvider = {
+    id: provider.id,
+    events: provider.events,
+    install: { hookMarker: install.hookMarker },
+  };
+  return updateAgentHookConfig(install, options, (config) =>
+    format.install(config, formatProvider),
+  );
 }
 
 export function uninstallAgentHooks<TConfig>(
   provider: AgentHookProvider<TConfig>,
   options: AgentHookInstallOptions = {},
 ): AgentHookInstallResult {
-  if (provider.install.kind === "plugin-file") {
-    return uninstallAgentHookPluginFile(provider.install, options);
+  const install: AgentHookInstallStrategy<TConfig> = provider.install;
+  if (install.kind === "plugin-file") {
+    return uninstallAgentHookPluginFile(install, options);
   }
 
-  const format = provider.install.format;
-  return updateAgentHookConfig(provider, options, (config) => format.uninstall(config, provider));
+  const format = install.format;
+  const formatProvider: AgentHookFormatProvider = {
+    id: provider.id,
+    events: provider.events,
+    install: { hookMarker: install.hookMarker },
+  };
+  return updateAgentHookConfig(install, options, (config) =>
+    format.uninstall(config, formatProvider),
+  );
 }
 
 export function agentHooksAreInstalled<TConfig>(
@@ -103,13 +129,18 @@ export function agentHooksAreInstalled<TConfig>(
   if (!existsSync(configPath)) {
     return false;
   }
-  if (provider.install.kind === "plugin-file") {
+  const install: AgentHookInstallStrategy<TConfig> = provider.install;
+  if (install.kind === "plugin-file") {
     const currentRaw = readFileSync(configPath, "utf8");
-    return normalizeRawConfig(currentRaw) === normalizeRawConfig(provider.install.source);
+    return normalizeRawConfig(currentRaw) === normalizeRawConfig(install.source);
   }
 
-  const config = provider.install.format.parse(readFileSync(configPath, "utf8"));
-  return provider.install.format.isInstalled(config, provider);
+  const config = install.format.parse(readFileSync(configPath, "utf8"));
+  return install.format.isInstalled(config, {
+    id: provider.id,
+    events: provider.events,
+    install: { hookMarker: install.hookMarker },
+  });
 }
 
 export function resolveAgentHookConfigPath<TConfig>(
@@ -119,30 +150,46 @@ export function resolveAgentHookConfigPath<TConfig>(
   return resolveAgentHookInstallPath(provider.install, options);
 }
 
+/** The install fields that locate the config file. */
+interface AgentHookInstallLocation {
+  configDir: string;
+  configDirBase?: "home" | "xdg-config";
+  configFile: string;
+  configDirEnvOverride?: string;
+}
+
 function resolveAgentHookInstallPath<TConfig>(
   install: AgentHookInstallStrategy<TConfig>,
   options: AgentHookInstallOptions,
 ): string {
+  // A record of only the location fields: scriptc cannot pass the strategy union, whose
+  // config-file arm carries `TConfig`, on to non-generic code.
+  const location: AgentHookInstallLocation = {
+    configDir: install.configDir,
+    configDirBase: install.configDirBase,
+    configFile: install.configFile,
+    configDirEnvOverride: install.configDirEnvOverride,
+  };
   const configDir =
     options.configDir ??
     resolveConfiguredDirectory({
-      install,
+      location,
       env: options.env ?? process.env,
       homeDir: options.homeDir ?? homedir(),
     });
-  return path.join(configDir, install.configFile);
+  return path.join(configDir, location.configFile);
 }
 
-export function buildAgentHookShellCommand<TConfig>(
-  provider: AgentHookProvider<TConfig>,
+export function buildAgentHookShellCommand(
+  provider: AgentHookFormatProvider,
   event: AgentHookEventDefinition,
 ): string {
   const hookCommand = `"\${PASEO_HOOK_CLI:-paseo}" hooks ${shellToken(provider.id)} ${shellToken(event.event)}`;
   return `if [ -n "$PASEO_TERMINAL_ID" ]; then ${hookCommand}; fi`;
 }
 
-export function buildAgentHookWindowsCommand<TConfig>(
-  provider: AgentHookProvider<TConfig>,
+export function buildAgentHookWindowsCommand(
+  provider: AgentHookFormatProvider,
   event: AgentHookEventDefinition,
 ): string {
   const hookArgs = `hooks ${windowsToken(provider.id)} ${windowsToken(event.event)}`;
@@ -179,15 +226,11 @@ function uninstallAgentHookPluginFile(
 }
 
 function updateAgentHookConfig<TConfig>(
-  provider: AgentHookProvider<TConfig>,
+  install: AgentHookConfigFileInstallStrategy<TConfig>,
   options: AgentHookInstallOptions,
   update: (config: TConfig) => TConfig,
 ): AgentHookInstallResult {
-  const install = provider.install;
-  if (install.kind !== "config-file") {
-    throw new Error(`Provider ${provider.id} does not use config-file hooks`);
-  }
-  const configPath = resolveAgentHookConfigPath(provider, options);
+  const configPath = resolveAgentHookInstallPath(install, options);
   const currentRaw = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
   const currentConfig =
     currentRaw === null ? install.format.empty() : install.format.parse(currentRaw);
@@ -202,22 +245,22 @@ function updateAgentHookConfig<TConfig>(
   return { configPath, changed: false };
 }
 
-function resolveConfiguredDirectory<TConfig>(input: {
-  install: AgentHookInstallStrategy<TConfig>;
+function resolveConfiguredDirectory(input: {
+  location: AgentHookInstallLocation;
   env: NodeJS.ProcessEnv;
   homeDir: string;
 }): string {
-  const overrideName = input.install.configDirEnvOverride;
+  const overrideName = input.location.configDirEnvOverride;
   const override = overrideName ? input.env[overrideName] : undefined;
   if (override) {
     return override;
   }
 
-  if (input.install.configDirBase === "xdg-config") {
-    return path.join(resolveXdgConfigHome(input), input.install.configDir);
+  if (input.location.configDirBase === "xdg-config") {
+    return path.join(resolveXdgConfigHome(input), input.location.configDir);
   }
 
-  return path.join(input.homeDir, input.install.configDir);
+  return path.join(input.homeDir, input.location.configDir);
 }
 
 function resolveXdgConfigHome(input: { env: NodeJS.ProcessEnv; homeDir: string }): string {

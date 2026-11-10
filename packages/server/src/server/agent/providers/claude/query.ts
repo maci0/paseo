@@ -1,5 +1,13 @@
 import { type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { query, type Options, type Query, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
+import { EventEmitter } from "node:events";
+import type { Readable, Writable } from "node:stream";
+import {
+  query,
+  type Options,
+  type Query,
+  type SpawnedProcess,
+  type SpawnOptions,
+} from "@anthropic-ai/claude-agent-sdk";
 
 import {
   createProviderEnvSpec,
@@ -26,6 +34,86 @@ export interface ClaudeQueryContext {
 
 function isChildProcessWithStreams(child: ChildProcess): child is ChildProcessWithoutNullStreams {
   return child.stdin !== null && child.stdout !== null && child.stderr !== null;
+}
+
+type ExitListener = (code: number | null, signal: NodeJS.Signals | null) => void;
+type ErrorListener = (error: Error) => void;
+
+/** The error Node's spawn() emits when its `signal` aborts the child. */
+class SpawnAbortError extends Error {
+  readonly code = "ABORT_ERR";
+
+  constructor(cause: unknown) {
+    super("The operation was aborted", { cause });
+    this.name = "AbortError";
+  }
+}
+
+/**
+ * The child behind the SDK's SpawnedProcess interface, with spawn()'s `signal` option done
+ * here: on abort a live child gets SIGTERM and an AbortError 'error', as Node does. scriptc
+ * passes no ChildProcess where SpawnedProcess is declared (it fails at run time) and lowers
+ * no spawn() `signal` option.
+ */
+class SpawnedClaudeProcess implements SpawnedProcess {
+  readonly stdin: Writable;
+  readonly stdout: Readable;
+  private readonly events = new EventEmitter();
+
+  constructor(
+    private readonly child: ChildProcessWithoutNullStreams,
+    signal: AbortSignal,
+  ) {
+    this.stdin = child.stdin;
+    this.stdout = child.stdout;
+    child.on("exit", (code: number | null, exitSignal: NodeJS.Signals | null) =>
+      this.events.emit("exit", code, exitSignal),
+    );
+    child.on("error", (error: Error) => this.events.emit("error", error));
+    const onAbort = (): void => {
+      if (child.kill("SIGTERM")) this.events.emit("error", new SpawnAbortError(signal.reason));
+    };
+    if (signal.aborted) {
+      process.nextTick(onAbort);
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+      child.once("exit", () => signal.removeEventListener("abort", onAbort));
+    }
+  }
+
+  get killed(): boolean {
+    return this.child.killed;
+  }
+
+  get exitCode(): number | null {
+    return this.child.exitCode;
+  }
+
+  get signalCode(): NodeJS.Signals | null {
+    return this.child.signalCode;
+  }
+
+  kill(signal: NodeJS.Signals): boolean {
+    return this.child.kill(signal);
+  }
+
+  on(event: "exit", listener: ExitListener): void;
+  on(event: "error", listener: ErrorListener): void;
+  on(event: "exit" | "error", listener: ExitListener | ErrorListener): void {
+    this.events.on(event, listener);
+  }
+
+  once(event: "exit", listener: ExitListener): void;
+  once(event: "error", listener: ErrorListener): void;
+  once(event: "exit" | "error", listener: ExitListener | ErrorListener): void {
+    this.events.once(event, listener);
+  }
+
+  off(event: "exit", listener: ExitListener): void;
+  off(event: "error", listener: ErrorListener): void;
+  off(event: "exit" | "error", listener: ExitListener | ErrorListener): void {
+    this.events.off(event, listener);
+  }
 }
 
 function resolveClaudeSpawnCommand(
@@ -87,7 +175,6 @@ function applyRuntimeSettingsToClaudeOptions(
         ...(selfNodeCommand
           ? { env: selfNodeCommand.env, envMode: "internal" as const }
           : providerEnvSpec),
-        signal: spawnOptions.signal,
         stdio: ["pipe", "pipe", "pipe"],
         // Bypass cmd.exe on Windows: the SDK passes --mcp-config with inline JSON
         // containing double quotes, which cmd.exe mangles (strips quotes, breaks parsing).
@@ -103,7 +190,7 @@ function applyRuntimeSettingsToClaudeOptions(
       if (!isChildProcessWithStreams(child)) {
         throw new Error("Claude process was spawned without stdio streams");
       }
-      return child;
+      return new SpawnedClaudeProcess(child, spawnOptions.signal);
     },
   };
 }

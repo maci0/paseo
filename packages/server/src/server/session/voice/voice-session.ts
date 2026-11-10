@@ -1271,12 +1271,11 @@ export class VoiceSession {
       typeof msg.payload.audio === "string"
     ) {
       const groupId = msg.payload.groupId;
-      const existing =
-        this.ttsDebugStreams.get(groupId) ??
-        ({ format: msg.payload.format, chunks: [] } satisfies {
-          format: string;
-          chunks: Buffer[];
-        });
+      // Annotated so scriptc sees Buffer[], not a never[] | Buffer[] union it cannot push into.
+      const existing: { format: string; chunks: Buffer[] } = this.ttsDebugStreams.get(groupId) ?? {
+        format: msg.payload.format,
+        chunks: [],
+      };
 
       try {
         existing.chunks.push(Buffer.from(msg.payload.audio, "base64"));

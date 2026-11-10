@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import * as pluginSharedRuntime from "@getpaseo/plugin";
 import * as pluginProviderRuntime from "@getpaseo/plugin/server/provider";
 import * as pluginAcpRuntime from "@getpaseo/plugin/server/acp";
@@ -7,8 +6,7 @@ import * as pluginServerRuntime from "@getpaseo/plugin/server";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
 import * as zod from "zod";
 import { isPluginClientOnlySdkSpecifier } from "./plugin-sdk-specifiers.js";
-
-const nodeRequire = createRequire(import.meta.url);
+import { requireNodeOnly } from "../node-only-require.js";
 
 function runtimeRequire(name: string): unknown {
   if (isPluginClientOnlySdkSpecifier(name)) {
@@ -22,10 +20,16 @@ function runtimeRequire(name: string): unknown {
   if (name === "zod") return zod;
   if (name === "@getpaseo/plugin/client/host")
     throw new Error(`${name} is private to the app host`);
-  return nodeRequire(name);
+  return requireNodeOnly(name);
 }
 
 export function evaluateBundle(bundle: string): PluginServerContribution {
+  // A scriptc binary has no JavaScript engine: its eval always throws EvalError.
+  if (process.argv[0] === "scriptc") {
+    throw new Error(
+      "Plugin server code needs the Node.js daemon: the native binary cannot evaluate it",
+    );
+  }
   const evaluate: (source: string) => unknown = globalThis.eval;
   const factory = evaluate(bundle);
   if (typeof factory !== "function") throw new Error("Plugin server bundle is not executable");

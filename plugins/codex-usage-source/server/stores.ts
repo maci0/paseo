@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { loadNodeBuiltin } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { routeSchema } from "../shared/input.js";
 
@@ -73,11 +74,13 @@ function ompDatabasePath(lookup: StoreLookup): string {
 
 function builtinSqlite(): Sqlite | undefined {
   // Node 20 must still compile/load the plugin; only OMP needs this newer builtin.
+  // A scriptc binary has no node:sqlite, so it reads no OMP logins.
+  if (process.argv[0] === "scriptc") return undefined;
   const parsed = z
     .object({
       DatabaseSync: z.custom<Sqlite["DatabaseSync"]>((value) => typeof value === "function"),
     })
-    .safeParse(process.getBuiltinModule?.("node:sqlite"));
+    .safeParse(loadNodeBuiltin("node:sqlite"));
   return parsed.success ? parsed.data : undefined;
 }
 

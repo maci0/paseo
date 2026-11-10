@@ -591,7 +591,7 @@ export function createWorkerTerminalManager(
 
   function attachWorker(): void {
     const connection = worker;
-    connection.on("message", (message: TerminalWorkerToParentMessage) => {
+    connection.onMessage((message: TerminalWorkerToParentMessage) => {
       if (message.type === "terminalReplay") {
         // Consumption queues into the application's bounded transport synchronously.
         // Never wait for app network delivery or accumulate a second replay queue here.
@@ -624,7 +624,7 @@ export function createWorkerTerminalManager(
       handleWorkerEvent(message);
     });
 
-    connection.on("close", () => {
+    connection.onClose(() => {
       if (worker !== connection) return;
       workerDisconnected = true;
       rejectPendingRequests(new Error("Terminal worker connection closed"));
@@ -729,7 +729,7 @@ export function createWorkerTerminalManager(
       return Promise.resolve();
     }
     return new Promise<void>((resolve) => {
-      worker.on("close", () => resolve());
+      worker.onClose(() => resolve());
       worker.disconnect();
     });
   }
@@ -737,7 +737,8 @@ export function createWorkerTerminalManager(
   function closeTerminals(): Promise<void> {
     detached = true;
     closePromise ??= (async () => {
-      await reconnecting;
+      // `?? Promise.resolve()` keeps the yield of `await null`; scriptc cannot await a nullable.
+      await (reconnecting ?? Promise.resolve());
       if (managerOptions.closeTerminals) {
         await disconnectWorker();
         clearRecords();
@@ -952,7 +953,8 @@ export function createWorkerTerminalManager(
 
     async detach(options?: { afterPendingRequests?: boolean }): Promise<void> {
       detached = true;
-      await reconnecting;
+      // `?? Promise.resolve()` keeps the yield of `await null`; scriptc cannot await a nullable.
+      await (reconnecting ?? Promise.resolve());
       if (options?.afterPendingRequests) {
         await Promise.allSettled(Array.from(inFlight));
       }

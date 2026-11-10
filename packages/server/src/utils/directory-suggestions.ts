@@ -1,8 +1,8 @@
 import type { Dirent, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import pLimit from "p-limit";
 import { scorePathMatch, type MatchScore } from "@getpaseo/protocol/search/text-match";
+import { ConcurrencyLimit } from "./concurrency-limit.js";
 import { isPathInsideRoot } from "./path.js";
 import { runGitCommand } from "./run-git-command.js";
 
@@ -124,29 +124,38 @@ const NO_MATCH_TIER = 5;
 // share two threads and leave the rest of the pool to the daemon. Searches over one tree walk it
 // in the same order and stop at the same stuck folder, so they share its pending call and hold one
 // thread between them instead of both.
-const filesystemCalls = pLimit(2);
-const pendingFilesystemCalls = new Map<string, Promise<unknown>>();
+// One map per result type: scriptc cannot cast a Promise<unknown> back to Promise<T>.
+const filesystemCalls = new ConcurrencyLimit(2);
+const pendingReaddirCalls = new Map<string, Promise<Dirent[]>>();
+const pendingRealpathCalls = new Map<string, Promise<string>>();
+const pendingStatCalls = new Map<string, Promise<Stats>>();
 
-function sharedFilesystemCall<T>(key: string, call: () => Promise<T>): Promise<T> {
+function sharedFilesystemCall<T>(
+  pendingFilesystemCalls: Map<string, Promise<T>>,
+  key: string,
+  call: () => Promise<T>,
+): Promise<T> {
   const pending = pendingFilesystemCalls.get(key);
-  if (pending) return pending as Promise<T>;
-  const started = filesystemCalls(call).finally(() => pendingFilesystemCalls.delete(key));
+  if (pending) return pending;
+  const started = filesystemCalls.run(call).finally(() => pendingFilesystemCalls.delete(key));
   pendingFilesystemCalls.set(key, started);
   return started;
 }
 
 function readdir(directory: string): Promise<Dirent[]> {
-  return sharedFilesystemCall(`readdir:${directory}`, () =>
+  return sharedFilesystemCall(pendingReaddirCalls, `readdir:${directory}`, () =>
     fs.readdir(directory, { withFileTypes: true }),
   );
 }
 
 function realpath(target: string): Promise<string> {
-  return sharedFilesystemCall(`realpath:${target}`, () => fs.realpath(target));
+  return sharedFilesystemCall(pendingRealpathCalls, `realpath:${target}`, () =>
+    fs.realpath(target),
+  );
 }
 
 function stat(target: string): Promise<Stats> {
-  return sharedFilesystemCall(`stat:${target}`, () => fs.stat(target));
+  return sharedFilesystemCall(pendingStatCalls, `stat:${target}`, () => fs.stat(target));
 }
 
 export const WORKSPACE_SEARCH_HIDDEN_DIRECTORIES = [

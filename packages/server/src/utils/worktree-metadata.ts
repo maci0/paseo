@@ -1,9 +1,9 @@
-import { mkdir, open, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
 import pLimit from "p-limit";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { z } from "zod";
+import { openReadNonBlocking } from "./open-nonblocking.js";
 
 const MAX_WORKTREE_METADATA_BYTES = 64 * 1024;
 
@@ -383,7 +383,7 @@ async function readMetadataFile(worktreeRoot: string): Promise<PaseoWorktreeMeta
 // O_NONBLOCK lets us reject FIFOs by kind without hanging in open(). A fixed read also
 // caps a regular file that grows between stat and read; readFile's whole-file loop does not.
 async function readBoundedFile(path: string): Promise<string> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  const file = await openReadNonBlocking(path);
   try {
     const info = await file.stat();
     const limit = MAX_WORKTREE_METADATA_BYTES;
@@ -453,7 +453,9 @@ function resolveMetadataIdentity(worktreeRoot: string): Promise<string> {
   const path = resolve(worktreeRoot);
   const existing = metadataIdentities.get(path);
   if (existing) return existing;
-  const identity = metadataIo(async () => {
+  // Assigned after declaration: scriptc cannot reference a const from its own initializer.
+  let identity: Promise<string> | null = null;
+  identity = metadataIo(async () => {
     try {
       return await realpath(path);
     } catch {

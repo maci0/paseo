@@ -3,9 +3,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { Logger } from "pino";
 import type { McpServerConfig } from "../../agent-sdk-types.js";
+import { interpretingMcpJsonSchemaValidator } from "../../json-schema-validator.js";
 import type { PaseoToolResult } from "../../tools/types.js";
 import type { OmpRpcHostToolDefinition } from "./rpc-types.js";
 
@@ -22,6 +25,12 @@ export interface OmpBridgedToolIdentity {
 
 const SERVER_TIMEOUT_MS = 10_000;
 
+// scriptc cannot call Client.connect with the options parameter its override adds over
+// Protocol.connect; the call compiles through this interface.
+interface TimedConnect {
+  connect(transport: Transport, options?: RequestOptions): Promise<void>;
+}
+
 export class OmpMcpBridge {
   readonly definitions: OmpRpcHostToolDefinition[] = [];
   private readonly tools = new Map<string, BridgedTool>();
@@ -37,10 +46,17 @@ export class OmpMcpBridge {
     const bridge = new OmpMcpBridge();
     const connections = await Promise.all(
       Object.entries(servers ?? {}).map(async ([serverName, config]) => {
-        const client = new Client({ name: "paseo-omp-mcp", version: "1.0.0" });
+        // The SDK's default validator is ajv, which a scriptc binary cannot run.
+        const client = new Client(
+          { name: "paseo-omp-mcp", version: "1.0.0" },
+          process.argv[0] === "scriptc"
+            ? { jsonSchemaValidator: interpretingMcpJsonSchemaValidator }
+            : undefined,
+        );
         try {
           const transport = makeTransport(config, cwd, env);
-          await client.connect(transport, { timeout: SERVER_TIMEOUT_MS });
+          const connectable: TimedConnect = client;
+          await connectable.connect(transport, { timeout: SERVER_TIMEOUT_MS });
           const listed = await client.listTools(undefined, { timeout: SERVER_TIMEOUT_MS });
           return { serverName, client, tools: listed.tools };
         } catch (error) {
@@ -110,11 +126,13 @@ export class OmpMcpBridge {
 
 function makeTransport(config: McpServerConfig, cwd: string, env: NodeJS.ProcessEnv) {
   if (config.type === "stdio") {
+    // scriptc spreads index-signature records only into a target of the same value type.
+    const mergedEnv: NodeJS.ProcessEnv = { ...env, ...config.env };
     return new StdioClientTransport({
       command: config.command,
       args: config.args,
       cwd,
-      env: { ...env, ...config.env } as Record<string, string>,
+      env: mergedEnv as Record<string, string>,
       stderr: "ignore",
     });
   }

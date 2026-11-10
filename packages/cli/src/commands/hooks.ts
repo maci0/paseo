@@ -67,7 +67,6 @@ async function readInput(input: HookInput): Promise<string | null> {
   while (true) {
     const next = await withTimeout(iterator.next(), 100);
     if (!next) {
-      await iterator.return?.();
       return null;
     }
     if (next.done) return chunks.join("");

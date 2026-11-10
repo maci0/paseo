@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import type { Logger } from "pino";
 import { spawnProcess } from "../../../../../utils/spawn.js";
-import { terminateWithTreeKill } from "../../../../../utils/tree-kill.js";
+import { terminateChildWithTreeKill } from "../../../../../utils/tree-kill.js";
 import {
   createProviderEnvSpec,
   resolveProviderLaunch,
@@ -195,7 +195,8 @@ export class V2Runtime {
 
   async shutdown(): Promise<void> {
     this.closed = true;
-    await Promise.allSettled(this.starts);
+    // scriptc lowers Promise.allSettled over an array only, not a Set.
+    await Promise.allSettled(Array.from(this.starts));
     await Promise.all([...this.generations].map((generation) => generation.stop()));
     this.generations.clear();
     this.current = null;
@@ -293,7 +294,10 @@ export class V2Runtime {
         : Promise.resolve(null);
     const stop = () => {
       stopped ??= (async () => {
-        await terminateWithTreeKill(process, { gracefulTimeoutMs: 5_000, forceTimeoutMs: 1_000 });
+        await terminateChildWithTreeKill(process, {
+          gracefulTimeoutMs: 5_000,
+          forceTimeoutMs: 1_000,
+        });
         const entry = await record;
         if (entry) await managedProcesses?.remove(entry.id);
       })();

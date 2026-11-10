@@ -16,7 +16,7 @@ import fs from "node:fs/promises";
 import { randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createPathEquivalenceMatcher } from "../../../utils/path.js";
-import pLimit from "p-limit";
+import { ConcurrencyLimit } from "../../../utils/concurrency-limit.js";
 import type { Logger } from "pino";
 import { z } from "zod";
 
@@ -382,7 +382,9 @@ type OpenCodeMcpConfig =
 
 const MCP_ALREADY_PRESENT_ERROR_TOKENS = ["already", "exists", "connected"] as const;
 const OPENCODE_METADATA_CONCURRENCY = 4;
-const openCodeMetadataLimit = pLimit(OPENCODE_METADATA_CONCURRENCY);
+// ConcurrencyLimit, not p-limit: scriptc cannot pass the typed client results through
+// p-limit's untyped JavaScript (SC1101). Same FIFO scheduling.
+const openCodeMetadataLimit = new ConcurrencyLimit(OPENCODE_METADATA_CONCURRENCY);
 
 const OPENCODE_HANDLED_BUILTIN_SLASH_COMMANDS: AgentSlashCommand[] = [
   {
@@ -489,6 +491,12 @@ const OpencodeToolPartToTimelineItemSchema = OpencodeToolPartTimelineEnvelopeSch
       metadata: part.metadata,
     }),
 );
+
+// scriptc maps a spread of the event union back into the union only through a declared return type.
+function withStreamEventTurnId(event: AgentStreamEvent, turnId: string): AgentStreamEvent {
+  const tagged = { ...event, turnId };
+  return tagged;
+}
 
 function toOpenCodeMcpConfig(config: McpServerConfig): OpenCodeMcpConfig {
   if (config.type === "stdio") {
@@ -1184,11 +1192,16 @@ function buildOpenCodeReplayPartTimelineEvent(params: {
     });
   }
   const parsedToolPart = OpencodeToolPartToTimelineItemSchema.safeParse(part);
-  if (!parsedToolPart.success || !parsedToolPart.data) {
+  if (!parsedToolPart.success) {
+    return null;
+  }
+  // scriptc does not narrow a re-read of parsedToolPart.data; bind it once.
+  const toolItem: ToolCallTimelineItem | null = parsedToolPart.data;
+  if (!toolItem) {
     return null;
   }
   return buildOpenCodeReplayTimelineEvent({
-    item: parsedToolPart.data,
+    item: toolItem,
     message,
     part,
   });
@@ -1846,7 +1859,7 @@ export class OpenCodeAgentClient implements AgentClient {
     const response = await runProviderRefreshActivity(context, "provider.list", () =>
       raceProviderRefreshAbort(
         context?.signal,
-        openCodeMetadataLimit(() => {
+        openCodeMetadataLimit.run(() => {
           context?.signal.throwIfAborted();
           return client.provider.list(
             { directory },
@@ -1913,7 +1926,7 @@ export class OpenCodeAgentClient implements AgentClient {
     const response = await runProviderRefreshActivity(context, "app.agents", () =>
       raceProviderRefreshAbort(
         context?.signal,
-        openCodeMetadataLimit(() => {
+        openCodeMetadataLimit.run(() => {
           context?.signal.throwIfAborted();
           return client.app.agents({ directory }, context ? { signal: context.signal } : undefined);
         }),
@@ -1945,7 +1958,7 @@ export class OpenCodeAgentClient implements AgentClient {
     client: OpencodeClient,
     cwd: string,
   ): Promise<void> {
-    const response = await openCodeMetadataLimit(() => client.provider.list({ directory: cwd }));
+    const response = await openCodeMetadataLimit.run(() => client.provider.list({ directory: cwd }));
     if (response.error || !response.data) {
       return;
     }
@@ -3522,8 +3535,10 @@ class OpenCodeAgentSession implements AgentSession {
    * so the session does not keep calling a port nothing listens on.
    */
   private async reconnectIfServerExited(): Promise<void> {
-    if (!this.serverExited || !this.connectServer) return;
-    this.reconnection ??= this.reconnect(this.connectServer).finally(() => {
+    // A typed local: scriptc cannot pass the narrowed nullable field as a function value.
+    const connectServer = this.connectServer;
+    if (!this.serverExited || !connectServer) return;
+    this.reconnection ??= this.reconnect(connectServer).finally(() => {
       this.reconnection = null;
     });
     await this.reconnection;
@@ -3744,8 +3759,11 @@ class OpenCodeAgentSession implements AgentSession {
 
   async revertBoth(input: { messageId: string }): Promise<void> {
     await this.reconnectIfServerExited();
+    const client = this.client;
     await revertOpenCodeConversationAndFiles({
-      client: this.client,
+      // A record that forwards: scriptc cannot convert the client class instance to the
+      // OpenCodeRewindClient record type (SC2002).
+      client: { session: { revert: (request) => client.session.revert(request) } },
       sessionId: this.sessionId,
       cwd: this.config.cwd,
       messageId: input.messageId,
@@ -4139,16 +4157,19 @@ class OpenCodeAgentSession implements AgentSession {
     if (this.childHydrationPromise) {
       return;
     }
+    // scriptc cannot capture a const inside its own initializer, so the callback reads a let.
+    let current: Promise<void> | null = null;
     const hydration = this.hydrateChildSessions()
       .then(() => {
         this.childHydrationCompleted = true;
         return undefined;
       })
       .finally(() => {
-        if (this.childHydrationPromise === hydration) {
+        if (this.childHydrationPromise === current) {
           this.childHydrationPromise = null;
         }
       });
+    current = hydration;
     this.childHydrationPromise = hydration;
     void hydration.catch((error) => {
       this.logger.warn(
@@ -4868,7 +4889,7 @@ class OpenCodeAgentSession implements AgentSession {
       this.childStatuses.set(event.event.id, structuredClone(current));
     }
     const turnId = turnIdOverride === null ? null : (turnIdOverride ?? this.activeForegroundTurnId);
-    const tagged = turnId ? { ...event, turnId } : event;
+    const tagged = turnId ? withStreamEventTurnId(event, turnId) : event;
     this.traceOpenCode("provider.opencode.event_emit", {
       turnId: getAgentStreamEventTurnId(tagged),
       event: tagged,
@@ -4930,7 +4951,7 @@ class OpenCodeAgentSession implements AgentSession {
     }
 
     await this.reconnectIfServerExited();
-    const response = await openCodeMetadataLimit(() =>
+    const response = await openCodeMetadataLimit.run(() =>
       this.client.app.agents({
         directory: this.config.cwd,
       }),

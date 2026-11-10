@@ -2,7 +2,6 @@ import { existsSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
 import type { ProcessEnvRecord } from "../server/paseo-env.js";
 import { execCommand } from "../utils/spawn.js";
-import which from "which";
 import { windowsExecutableResolution } from "./windows.js";
 
 const PROBE_TIMEOUT_MS = 2000;
@@ -15,7 +14,7 @@ async function enumerateCandidates(name: string, env?: ProcessEnvRecord): Promis
   if (process.platform !== "win32" && existsSync("/usr/bin/which")) {
     return enumerateCandidatesViaSystemWhich(name, env);
   }
-  return enumerateCandidatesViaLibrary(name, env);
+  return enumerateCandidatesViaPath(name, env);
 }
 
 async function enumerateCandidatesViaSystemWhich(
@@ -36,29 +35,22 @@ async function enumerateCandidatesViaSystemWhich(
   }
 }
 
-async function enumerateCandidatesViaLibrary(
-  name: string,
-  env?: ProcessEnvRecord,
-): Promise<string[]> {
-  let candidates: string[];
-  try {
-    candidates = await which(name, { all: true, path: env?.PATH, pathExt: env?.PATHEXT });
-  } catch (error) {
-    // `which` throws ENOENT when the command is absent from PATH.
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  }
-
+function enumerateCandidatesViaPath(name: string, env?: ProcessEnvRecord): string[] {
+  const pathValue = env?.PATH ?? process.env.PATH ?? "";
+  const pathExt = (env?.PATHEXT ?? process.env.PATHEXT ?? "").split(delimiter).filter(Boolean);
+  const extensions = process.platform === "win32" ? ["", ...pathExt] : [""];
   const seen = new Set<string>();
-  return candidates.filter((candidate) => {
-    if (seen.has(candidate)) {
-      return false;
+  const candidates: string[] = [];
+  for (const directory of pathValue.split(delimiter)) {
+    if (directory.length === 0) continue;
+    for (const extension of extensions) {
+      const candidate = resolve(directory, name + extension);
+      if (seen.has(candidate) || !existsSync(candidate)) continue;
+      seen.add(candidate);
+      candidates.push(candidate);
     }
-    seen.add(candidate);
-    return true;
-  });
+  }
+  return candidates;
 }
 
 export async function probeExecutable(
@@ -133,7 +125,7 @@ export async function findExecutableWithoutProbing(
           .split(delimiter)
           .map((entry) => resolve(options.cwd, entry))
           .join(delimiter);
-  const candidates = await enumerateCandidatesViaLibrary(name, { PATH: path });
+  const candidates = enumerateCandidatesViaPath(name, path === undefined ? undefined : { PATH: path });
   return candidates[0] ?? null;
 }
 

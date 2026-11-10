@@ -9,6 +9,8 @@ interface CronDateParts {
   dayOfWeek: number;
 }
 
+const CRON_DATE_FORMAT_PATTERN = /^(\d{2})\/(\d{2})\/(\d+), (\d{2}):(\d{2})$/;
+
 function startOfNextMinute(date: Date): Date {
   return new Date(
     Date.UTC(
@@ -54,21 +56,22 @@ function createCronDatePartsReader(timeZone: string | undefined): (date: Date) =
     minute: "2-digit",
   });
 
+  // scriptc has no formatToParts, so the parts come from en-US format() output,
+  // "MM/DD/YYYY, HH:mm" with these options.
   return (date: Date) => {
-    const values: Record<string, string> = {};
-    for (const part of formatter.formatToParts(date)) {
-      if (part.type !== "literal") {
-        values[part.type] = part.value;
-      }
+    const formatted = formatter.format(date);
+    const match = CRON_DATE_FORMAT_PATTERN.exec(formatted);
+    if (!match) {
+      throw new Error(`Unexpected cron date format for time zone ${timeZone}: ${formatted}`);
     }
 
-    const year = Number.parseInt(values.year, 10);
-    const month = Number.parseInt(values.month, 10);
-    const dayOfMonth = Number.parseInt(values.day, 10);
+    const year = Number.parseInt(match[3], 10);
+    const month = Number.parseInt(match[1], 10);
+    const dayOfMonth = Number.parseInt(match[2], 10);
 
     return {
-      minute: Number.parseInt(values.minute, 10),
-      hour: Number.parseInt(values.hour, 10),
+      minute: Number.parseInt(match[5], 10),
+      hour: Number.parseInt(match[4], 10),
       dayOfMonth,
       month,
       dayOfWeek: new Date(Date.UTC(year, month - 1, dayOfMonth)).getUTCDay(),

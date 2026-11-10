@@ -33,7 +33,7 @@ function appendTrace(event: Record<string, unknown>): void {
   if (!tracePath) return;
 
   pendingTraceWrite = pendingTraceWrite
-    .then(() => appendFile(tracePath, `${JSON.stringify(event)}\n`, "utf8"))
+    .then(() => appendFile(tracePath, `${JSON.stringify(event)}\n`))
     .catch(() => {
       // Diagnostic tracing must never change command execution.
     });

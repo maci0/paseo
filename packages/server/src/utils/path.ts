@@ -181,7 +181,10 @@ export function normalizePathPreservingCase(value: string, compareAsWindows: boo
   const platformNormalized = platformPath.normalize(comparableValue);
   return stripTrailingSeparators(
     platformNormalized,
-    platformPath.parse(platformNormalized).root,
+    // scriptc lowers ParsedPath.root only on a direct win32 or posix parse() call.
+    compareAsWindows
+      ? nodePath.win32.parse(platformNormalized).root
+      : nodePath.posix.parse(platformNormalized).root,
     compareAsWindows,
   );
 }

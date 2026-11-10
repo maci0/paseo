@@ -9,6 +9,7 @@ import { inferAudioExtension } from "../../../agent/audio-utils.js";
 import type {
   LogprobToken,
   SpeechToTextProvider,
+  StreamingTranscriptionEvent,
   StreamingTranscriptionSession,
   TranscriptionResult,
 } from "../../speech-provider.js";
@@ -129,13 +130,15 @@ export class OpenAISTT implements SpeechToTextProvider {
         void (async () => {
           try {
             if (pcm16.length === 0) {
-              emitter.emit("transcript", {
+              // Typed payloads: scriptc needs every emit of one event to share a type.
+              const emptyTranscript: StreamingTranscriptionEvent = {
                 segmentId: committedId,
                 transcript: "",
                 isFinal: true,
                 language: params.language,
                 isLowConfidence: true,
-              });
+              };
+              emitter.emit("transcript", emptyTranscript);
               return;
             }
 
@@ -148,7 +151,7 @@ export class OpenAISTT implements SpeechToTextProvider {
               params.prompt,
             );
 
-            emitter.emit("transcript", {
+            const transcript: StreamingTranscriptionEvent = {
               segmentId: committedId,
               transcript: result.text,
               isFinal: true,
@@ -156,7 +159,8 @@ export class OpenAISTT implements SpeechToTextProvider {
               logprobs: result.logprobs,
               avgLogprob: result.avgLogprob,
               isLowConfidence: result.isLowConfidence,
-            });
+            };
+            emitter.emit("transcript", transcript);
           } catch (err) {
             emitter.emit("error", err);
           } finally {

@@ -42,7 +42,7 @@ function projectFolderSessionStore(projectFolder: string): SessionStore {
     },
     async append({ sessionId }, entries) {
       const lines = entries.map((entry) => `${JSON.stringify(entry)}\n`).join("");
-      await appendFile(transcriptPath(sessionId), lines, "utf8");
+      await appendFile(transcriptPath(sessionId), lines);
     },
   };
 }

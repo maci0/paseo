@@ -23,6 +23,12 @@ export function resolvePaseoCliExecutablePath(): string | null {
     return resolvePath(configuredCli);
   }
 
+  // A scriptc daemon ships beside its CLI binary (make dist).
+  if (process.argv[0] === "scriptc") {
+    const besideDaemon = join(dirname(process.execPath), "paseo");
+    return existsSync(besideDaemon) ? besideDaemon : null;
+  }
+
   const cliEntrypoint = resolvePaseoCliBinEntrypoint();
   if (!cliEntrypoint) {
     return null;

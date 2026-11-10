@@ -43,23 +43,39 @@ export function describeDaemonTarget(target: DaemonTarget): string {
     const input = target.host.trim();
     const parsed = parseHostTarget(input);
     // Discovery descriptions are display text; command hints must preserve the address syntax.
-    if (parsed.kind === "ssh" || (!parsed.offer && !parsed.socketPath && input.includes("://"))) {
-      const url = new URL(input);
-      if (decodeURIComponent(url.username).includes(":")) url.username = "REDACTED";
-      for (const key of new Set(url.searchParams.keys())) {
-        const routingOption =
-          (parsed.kind === "ssh" && key === "daemonPort") ||
-          (key === "ssl" &&
-            url.searchParams.getAll(key).every((value) => value === "true" || value === "false"));
-        if (!routingOption) url.searchParams.set(key, "REDACTED");
-      }
-      return url.toString();
+    // The kind is read from the same prefixes parseHostTarget uses, because scriptc
+    // cannot read offer or socketPath off the HostTarget union.
+    if (input.startsWith("ssh://")) return redactEndpoint(input, true);
+    if (input.startsWith("relay://") || input.includes("#connect=")) return parsed.description;
+    if (
+      input.startsWith("unix://") ||
+      input.startsWith("pipe://") ||
+      input.startsWith("/") ||
+      input.startsWith("~") ||
+      input.startsWith("\\\\.\\pipe\\")
+    ) {
+      return input;
     }
-    // Pairing offers must always use safe display text, including prefix-free fragments.
-    return parsed.kind === "socket" && !parsed.offer && !input.includes("://")
-      ? input
-      : parsed.description;
+    if (input.includes("://")) return redactEndpoint(input, false);
+    return parsed.description;
   } catch {
     return "<invalid endpoint>";
   }
+}
+
+function redactEndpoint(input: string, ssh: boolean): string {
+  const url = new URL(input);
+  if (decodeURIComponent(url.username).includes(":")) url.username = "REDACTED";
+  const keys: string[] = [];
+  url.searchParams.forEach((_value, key) => {
+    if (!keys.includes(key)) keys.push(key);
+  });
+  for (const key of keys) {
+    const values = url.searchParams.getAll(key);
+    const routingOption =
+      (ssh && key === "daemonPort") ||
+      (key === "ssl" && values.every((value) => value === "true" || value === "false"));
+    if (!routingOption) url.searchParams.set(key, "REDACTED");
+  }
+  return url.toString();
 }

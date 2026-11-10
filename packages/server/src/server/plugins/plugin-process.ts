@@ -25,8 +25,39 @@ import { createPluginClientId } from "./plugin-session-identity.js";
 import { PluginSettingsStore } from "./settings/index.js";
 import { readPluginProviderIcon } from "./provider-icon.js";
 import { initializeEnvironmentProxy } from "../network/index.js";
+import { sendToParent } from "./parent-ipc.js";
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+type RpcHandler = (input: unknown, context: PluginHandlerContext) => unknown | Promise<unknown>;
+
+// scriptc lowers only top-level generic functions, so the worker's settings state is passed in.
+interface SettingsRegistration {
+  store: PluginSettingsStore | null;
+  register(contract: PluginRpcContract, handler: RpcHandler): void;
+}
+
+function registerPluginSettings<Schema extends ZodType>(
+  target: SettingsRegistration,
+  definition: SettingsDefinition<Schema>,
+) {
+  if (!target.store) throw new Error("Plugin settings storage is unavailable");
+  const handlers = target.store.register(definition);
+  // scriptc cannot call a function through a nested record field, so the handlers are locals.
+  const { write, reset } = handlers;
+  const writeSettings = write.handle;
+  const resetSettings = reset.handle;
+  target.register(handlers.read.contract, handlers.read.handle);
+  target.register(write.contract, (input) => writeSettings(write.contract.input.parse(input)));
+  target.register(reset.contract, (input) => resetSettings(reset.contract.input.parse(input)));
+  return handlers.settings;
+}
+
+function jsonTransportValue<Value>(value: Value): Value {
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new Error("Provider value is not JSON-serializable");
+  return JSON.parse(encoded) as Value;
 }
 
 export interface PluginWorkerChannel {
@@ -40,22 +71,7 @@ export function createPluginWorker(options: {
   contribute: PluginServerContribution;
 }): { shutdown(): Promise<void> } {
   const { channel, contribute } = options;
-  let settingsStore: PluginSettingsStore | null = null;
-  function registerSettings<Schema extends ZodType>(definition: SettingsDefinition<Schema>) {
-    if (!settingsStore) throw new Error("Plugin settings storage is unavailable");
-    const handlers = settingsStore.register(definition);
-    register(handlers.read.contract, handlers.read.handle);
-    register(handlers.write.contract, (input) =>
-      handlers.write.handle(handlers.write.contract.input.parse(input)),
-    );
-    register(handlers.reset.contract, (input) =>
-      handlers.reset.handle(handlers.reset.contract.input.parse(input)),
-    );
-    return handlers.settings;
-  }
-
-  type RpcHandler = (input: unknown, context: PluginHandlerContext) => unknown | Promise<unknown>;
-
+  const settings: SettingsRegistration = { store: null, register };
   interface RegisteredRpc {
     contract: PluginRpcContract;
     handler: RpcHandler;
@@ -85,12 +101,6 @@ export function createPluginWorker(options: {
     return new Promise((resolve) => {
       channel.send(message, () => resolve());
     });
-  }
-
-  function jsonTransportValue<Value>(value: Value): Value {
-    const encoded = JSON.stringify(value);
-    if (encoded === undefined) throw new Error("Provider value is not JSON-serializable");
-    return JSON.parse(encoded) as Value;
   }
 
   function validateMethod(method: string): string {
@@ -278,7 +288,7 @@ export function createPluginWorker(options: {
     });
     paseo = createPaseoApi(daemonClient);
     await daemonClient.connect();
-    settingsStore = message.settingsDirectory
+    settings.store = message.settingsDirectory
       ? new PluginSettingsStore(message.settingsDirectory, (settingsId) =>
           send({ type: "settings.changed", settingsId }),
         )
@@ -288,7 +298,9 @@ export function createPluginWorker(options: {
         register(contract, (input, context) => handler(contract.input.parse(input), context)),
       registerProvider,
       registerUsageSource,
-      registerSettings,
+      registerSettings(definition) {
+        return registerPluginSettings(settings, definition);
+      },
       addHook: hooks.addHook,
       on: hooks.on,
       before: hooks.before,
@@ -590,8 +602,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const handlers = new Set<(message: PluginProcessRequest) => void>();
   const channel: PluginWorkerChannel = {
     send(message, callback) {
-      if (callback) process.send?.(message, () => callback());
-      else process.send?.(message);
+      sendToParent(message, callback);
     },
     onMessage(handler) {
       handlers.add(handler);

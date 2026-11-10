@@ -24,7 +24,10 @@ import {
   encodeTerminalStreamFrame,
   type TerminalStreamFrame,
 } from "@getpaseo/protocol/binary-frames/index";
-import { TerminalOutputCoalescer } from "./terminal-output-coalescer.js";
+import {
+  TERMINAL_OUTPUT_COALESCER_GLOBAL_TIMERS,
+  TerminalOutputCoalescer,
+} from "./terminal-output-coalescer.js";
 import {
   MAX_CLIENT_BUFFERED_BYTES,
   MAX_TERMINAL_OUTPUT_FRAME_BYTES,
@@ -120,7 +123,8 @@ type TerminalDispatchableMessage =
   | CaptureTerminalRequest
   | RenameTerminalRequest;
 
-const TERMINAL_MESSAGE_TYPES: ReadonlySet<TerminalDispatchableMessage["type"]> = new Set([
+// A string set: scriptc cannot pass a Set of a literal union where `Set<unknown>` is expected.
+const TERMINAL_MESSAGE_TYPES: ReadonlySet<string> = new Set<string>([
   "subscribe_terminals_request",
   "unsubscribe_terminals_request",
   "list_terminals_request",
@@ -131,7 +135,7 @@ const TERMINAL_MESSAGE_TYPES: ReadonlySet<TerminalDispatchableMessage["type"]> =
   "kill_terminal_request",
   "capture_terminal_request",
   "terminal.rename.request",
-]);
+] satisfies TerminalDispatchableMessage["type"][]);
 
 export class TerminalSessionController {
   private readonly terminalManager: TerminalManager | null;
@@ -438,9 +442,11 @@ export class TerminalSessionController {
         type: "list_terminals_response",
         payload: {
           ...(msg.cwd ? { cwd: msg.cwd } : {}),
-          terminals: terminals.map((terminal) =>
-            Object.assign(this.toTerminalInfo(terminal), { cwd: terminal.cwd }),
-          ),
+          // oxlint-disable-next-line oxc/no-map-spread -- Object.assign has no scriptc lowering.
+          terminals: terminals.map((terminal) => ({
+            ...this.toTerminalInfo(terminal),
+            cwd: terminal.cwd,
+          })),
           requestId: msg.requestId,
         },
       });
@@ -904,7 +910,7 @@ export class TerminalSessionController {
       bufferedOutputBytes: 0,
       outputBytesSinceSnapshot: 0,
       outputCoalescer: new TerminalOutputCoalescer({
-        timers: { setTimeout, clearTimeout },
+        timers: TERMINAL_OUTPUT_COALESCER_GLOBAL_TIMERS,
         onFlush: ({ payload }) => {
           if (this.activeStreams.get(slot) !== activeStream) {
             return;
@@ -1198,5 +1204,5 @@ export class TerminalSessionController {
 }
 
 function isTerminalMessage(msg: SessionInboundMessage): msg is TerminalDispatchableMessage {
-  return TERMINAL_MESSAGE_TYPES.has(msg.type as TerminalDispatchableMessage["type"]);
+  return TERMINAL_MESSAGE_TYPES.has(msg.type);
 }

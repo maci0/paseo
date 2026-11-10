@@ -249,8 +249,11 @@ export function createAgentUpdatesService(deps: AgentUpdatesServiceDeps): AgentU
       ? await deps.buildProjectPlacementForWorkspaceId(payload.workspaceId)
       : null;
     const backgroundVisible = await Promise.all(
-      observers.map(
-        (sub) => deps.includesWorkspace?.(payload, sub.filter?.includeBackground) ?? true,
+      // Every element is a promise: scriptc's Promise.all takes only Promise<T>[].
+      observers.map((sub) =>
+        deps.includesWorkspace
+          ? deps.includesWorkspace(payload, sub.filter?.includeBackground)
+          : Promise.resolve(true),
       ),
     );
     return (

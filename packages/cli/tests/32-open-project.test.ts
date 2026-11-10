@@ -28,7 +28,7 @@ assert.equal(isExistingDirectory({ pathArg: "project", cwd: process.cwd() }), tr
 assert.equal(
   classifyInvocation({
     argv: ["project"],
-    knownCommands: new Set(["run", "status"]),
+    knownCommands: ["run", "status"],
     cwd: process.cwd(),
   }).kind,
   "open-project",
@@ -36,7 +36,7 @@ assert.equal(
 assert.equal(
   classifyInvocation({
     argv: ["run"],
-    knownCommands: new Set(["run", "status"]),
+    knownCommands: ["run", "status"],
     cwd: process.cwd(),
   }).kind,
   "cli",

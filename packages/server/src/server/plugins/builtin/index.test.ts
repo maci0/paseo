@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -52,6 +53,27 @@ test("listed built-ins resolve to matching manifests and compile", async () => {
       client: await findEntry(["index.client.ts", "index.client.tsx"]),
     });
     expect(bundles.serverBundle).toBeTruthy();
+  }
+});
+
+test("the list, the native registry and the plugin directories name the same server-only built-ins", async () => {
+  const root = resolveBuiltinPluginsRoot();
+  const directories = (await readdir(root, { withFileTypes: true }))
+    .filter(
+      (entry) =>
+        entry.isDirectory() && existsSync(path.join(root, entry.name, "paseo-plugin.json")),
+    )
+    .map((entry) => entry.name)
+    .sort();
+  const listed = [...builtinPlugins].sort();
+  expect(directories).toEqual(listed);
+  const { builtinPluginContributions } =
+    await import("../../../../../../plugins/native-registry.js");
+  expect(Object.keys(builtinPluginContributions).sort()).toEqual(listed);
+  // The native daemon compiles no client entries.
+  for (const id of listed) {
+    expect(existsSync(path.join(root, id, "index.client.ts"))).toBe(false);
+    expect(existsSync(path.join(root, id, "index.client.tsx"))).toBe(false);
   }
 });
 

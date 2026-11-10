@@ -38,13 +38,14 @@ export const rpivTodo: PiExtension = {
                 type: "todo",
                 items: parsed.data.tasks.flatMap((task): AgentTaskItem[] => {
                   if (task.status === "deleted") return [];
+                  // scriptc cannot assign a field the literal left out; spread it in instead.
                   const item: AgentTaskItem = {
                     id: String(task.id),
                     text: task.subject,
                     status: task.status,
                     completed: task.status === "completed",
+                    ...(task.activeForm ? { activeForm: task.activeForm } : {}),
                   };
-                  if (task.activeForm) item.activeForm = task.activeForm;
                   return [item];
                 }),
               },

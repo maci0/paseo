@@ -25,6 +25,7 @@ export function withTimeout<T>(
     timeout = setTimeout(() => reject(new Error(options.message)), options.timeoutMs);
   });
 
+  // An array literal: scriptc lowers Promise.race over a literal, not over a typed local.
   return Promise.race([options.promise, timeoutPromise]).finally(() => {
     if (timeout) {
       clearTimeout(timeout);

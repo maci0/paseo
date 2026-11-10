@@ -68,7 +68,9 @@ export class WorkspaceLabelCatalogStore {
       filePath: string,
       transaction: unknown,
     ) => Promise<void> = writeJsonFileAtomic,
-    private readonly removeTransaction: (filePath: string) => Promise<void> = fs.rm,
+    private readonly removeTransaction: (filePath: string) => Promise<void> = (
+      transactionFilePath,
+    ) => fs.rm(transactionFilePath),
   ) {}
 
   async initialize(): Promise<void> {

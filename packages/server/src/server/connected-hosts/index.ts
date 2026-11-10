@@ -130,8 +130,8 @@ export class ConnectedHosts {
         if (
           existing.connection === input.connection &&
           existing.label === (input.label ?? null) &&
-          JSON.stringify(Object.entries(existing.metadata).sort()) ===
-            JSON.stringify(Object.entries(input.metadata ?? {}).sort())
+          JSON.stringify(sortedMetadataEntries(existing.metadata)) ===
+            JSON.stringify(sortedMetadataEntries(input.metadata ?? {}))
         )
           return this.summary(existing);
         throw new HostError(
@@ -388,6 +388,14 @@ export class ConnectedHosts {
       null,
       true,
     )({ url: "ws://host-link/ws" });
+    // Declared before route.close, which calls failed: scriptc cannot lower a reference to a
+    // closure-captured let declared later.
+    let opened!: () => void;
+    let failed!: (error: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => {
+      opened = resolve;
+      failed = reject;
+    });
     let closed = false;
     let verified = false;
     let helloSent = false;
@@ -413,12 +421,6 @@ export class ConnectedHosts {
     const abort = () =>
       route.close("host_offline", "Origin session closed or its authority changed");
     input.signal.addEventListener("abort", abort, { once: true });
-    let opened!: () => void;
-    let failed!: (error: unknown) => void;
-    const ready = new Promise<void>((resolve, reject) => {
-      opened = resolve;
-      failed = reject;
-    });
     if (input.signal.aborted) {
       route.close();
     }
@@ -529,6 +531,17 @@ export class ConnectedHosts {
     for (const route of this.routes) route.close();
     this.listeners.clear();
   }
+}
+
+// The order of a comparator-less sort, which scriptc lowers only for primitive arrays: each
+// entry compares as its string form, "key,value".
+function sortedMetadataEntries(metadata: Record<string, string>): [string, string][] {
+  return Object.entries(metadata).sort((a, b) => {
+    const left = `${a[0]},${a[1]}`;
+    const right = `${b[0]},${b[1]}`;
+    if (left < right) return -1;
+    return left > right ? 1 : 0;
+  });
 }
 
 function connectionFailure(error: unknown, authenticationFailed: boolean): HostSummary["error"] {

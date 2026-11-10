@@ -34,7 +34,7 @@ export interface WorkspaceGitObserverMetrics {
  * projection (recordDescriptorState). Both stay inside this module so the shared state is coherent.
  */
 export interface WorkspaceGitObserverService {
-  syncObservers(workspaces: Iterable<WorkspaceDescriptorPayload>): void;
+  syncObservers(workspaces: readonly WorkspaceDescriptorPayload[]): void;
   reconcileObservers(
     workspaces: Iterable<
       Pick<WorkspaceDescriptorPayload, "id" | "workspaceDirectory" | "workspaceKind">
@@ -174,7 +174,7 @@ export function createWorkspaceGitObserverService(deps: {
     subscriptions.set(normalizedCwd, subscription.unsubscribe);
   }
 
-  function syncObservers(workspaces: Iterable<WorkspaceDescriptorPayload>): void {
+  function syncObservers(workspaces: readonly WorkspaceDescriptorPayload[]): void {
     for (const workspace of workspaces) {
       syncObserver(workspace.workspaceDirectory, {
         isGit: workspace.workspaceKind !== "directory",

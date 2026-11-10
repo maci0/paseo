@@ -1,10 +1,11 @@
 import type { Socket } from "node:net";
-import { deserialize, serialize } from "node:v8";
+import { deserializeV8, serializeV8 } from "./terminal-worker-v8-codec.js";
 
 // Frames on the terminal worker socket: a 4-byte big-endian length, then a v8-serialized
 // payload (the same structured-clone semantics the old fork IPC used with
 // `serialization: "advanced"`). The frame format is part of the frozen envelope: every worker
-// version must keep it.
+// version must keep it. The payload codec reimplements `node:v8`'s format because a scriptc
+// binary has no `node:v8`.
 const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 
@@ -16,7 +17,7 @@ export class TerminalWorkerFrameError extends Error {
 }
 
 export function encodeFrame(value: unknown): Buffer {
-  const payload = serialize(value);
+  const payload = serializeV8(value);
   if (payload.length > MAX_FRAME_BYTES) {
     throw new TerminalWorkerFrameError(
       `Terminal worker frame of ${payload.length} bytes is too large`,
@@ -40,7 +41,7 @@ export class FrameDecoder {
       }
       const end = FRAME_HEADER_BYTES + length;
       if (this.buffered.length < end) break;
-      messages.push(deserialize(this.buffered.subarray(FRAME_HEADER_BYTES, end)));
+      messages.push(deserializeV8(this.buffered.subarray(FRAME_HEADER_BYTES, end)));
       this.buffered = this.buffered.subarray(end);
     }
     return messages;
@@ -57,10 +58,14 @@ export interface FramedSocket {
 /**
  * Wraps a connected socket in length-prefixed frames. A malformed frame destroys the socket:
  * the peer is either not a terminal worker endpoint or is corrupt, and both end the session.
+ * `onFrameError` receives the decode error on the next tick, before the socket's `close`, where
+ * `socket.destroy(error)` would emit it as the socket's `error` (scriptc compiles neither the
+ * one-argument `destroy` nor `Socket.emit`).
  */
 export function attachFramedSocket(
   socket: Socket,
   onMessage: (message: unknown) => void,
+  onFrameError: (error: Error) => void,
 ): FramedSocket {
   const decoder = new FrameDecoder();
   socket.on("data", (chunk: Buffer) => {
@@ -68,7 +73,9 @@ export function attachFramedSocket(
     try {
       messages = decoder.push(chunk);
     } catch (error) {
-      socket.destroy(error instanceof Error ? error : new Error(String(error)));
+      const frameError = error instanceof Error ? error : new Error(String(error));
+      socket.destroy();
+      process.nextTick(() => onFrameError(frameError));
       return;
     }
     for (const message of messages) {

@@ -57,17 +57,30 @@ export interface SherpaOfflineRecognizerConfig {
   maxActivePaths?: number;
 }
 
+// Required members are method signatures: a scriptc binary matches class methods of the FFI
+// module (native/sherpa/sherpa-onnx-ffi.ts) only to method signatures.
 interface SherpaOfflineRecognizerNative {
-  config?: { featConfig?: { sampleRate?: number } };
-  createStream: () => unknown;
-  decode: (stream: unknown) => void;
-  getResult: (stream: unknown) => { text?: string } | string | undefined;
+  createStream(): SherpaOfflineStreamNative;
+  decode(stream: SherpaOfflineStreamNative): void;
+  getResult(stream: SherpaOfflineStreamNative): SherpaOfflineRecognizerResult;
   free?: () => void;
 }
 
+type SherpaOfflineRecognizerResult = { text?: string } | string | undefined;
+
+// Narrows with typeof only: a scriptc binary refuses `in` on this union.
+export function recognizerResultText(result: SherpaOfflineRecognizerResult): string {
+  if (typeof result === "string") {
+    return result;
+  }
+  if (typeof result === "object") {
+    return result.text ?? String(result);
+  }
+  return "";
+}
+
 interface SherpaOfflineStreamNative {
-  acceptWaveform: ((arg: { samples: Float32Array; sampleRate: number }) => void) &
-    ((sampleRate: number, samples: Float32Array) => void);
+  acceptWaveform(arg: { samples: Float32Array; sampleRate: number }): void;
   free?: () => void;
 }
 
@@ -110,11 +123,8 @@ export class SherpaOfflineRecognizerEngine {
         OfflineRecognizer: new (config: unknown) => SherpaOfflineRecognizerNative;
       }
     ).OfflineRecognizer(recognizerConfig);
-    const sr = this.recognizer?.config?.featConfig?.sampleRate;
-    this.sampleRate =
-      typeof sr === "number" && Number.isFinite(sr) && sr > 0
-        ? sr
-        : recognizerConfig.featConfig.sampleRate;
+    // The addon keeps the config object it was given, so this is the value it reports back.
+    this.sampleRate = recognizerConfig.featConfig.sampleRate;
 
     this.logger.info(
       { sampleRate: this.sampleRate, numThreads: recognizerConfig.modelConfig.numThreads },
@@ -123,7 +133,7 @@ export class SherpaOfflineRecognizerEngine {
   }
 
   createStream(): SherpaOfflineStreamNative {
-    return this.recognizer.createStream() as SherpaOfflineStreamNative;
+    return this.recognizer.createStream();
   }
 
   acceptWaveform(
@@ -135,13 +145,7 @@ export class SherpaOfflineRecognizerEngine {
       throw new Error("Unexpected sherpa offline stream: missing acceptWaveform()");
     }
 
-    // sherpa-onnx-node expects: acceptWaveform({ samples, sampleRate })
-    // sherpa-onnx (WASM) expects: acceptWaveform(sampleRate, samples)
-    if (stream.acceptWaveform.length <= 1) {
-      stream.acceptWaveform({ samples, sampleRate });
-    } else {
-      stream.acceptWaveform(sampleRate, samples);
-    }
+    stream.acceptWaveform({ samples, sampleRate });
   }
 
   free(): void {

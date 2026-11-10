@@ -990,6 +990,11 @@ interface Waiter<T> {
   submitted: boolean;
 }
 
+function dropWaiter(waiters: Waiter<unknown>[], waiter: Waiter<unknown>): void {
+  const index = waiters.indexOf(waiter);
+  if (index >= 0) waiters.splice(index, 1);
+}
+
 interface WaitHandle<T> {
   promise: Promise<T>;
   cancel: (error: Error) => void;
@@ -1387,7 +1392,7 @@ export class DaemonClient {
     Set<(message: SessionOutboundMessage) => void>
   > = new Map();
   private eventListeners: Set<DaemonEventHandler> = new Set();
-  private waiters: Set<Waiter<unknown>> = new Set();
+  private waiters: Waiter<unknown>[] = [];
   private checkoutStatusInFlight: Map<string, Promise<CheckoutStatusPayload>> = new Map();
   private connectionListeners: Set<(status: ConnectionState) => void> = new Set();
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -2729,10 +2734,15 @@ export class DaemonClient {
   ): OwnedSubscription<FetchAgentsPayload> {
     if (options.includeBackground || options.filter?.includeBackground)
       this.requireBackgroundWorkspaces();
-    const { signal, requestId, timeout, ...query } = options;
+    const { signal, requestId, timeout, filter, includeBackground } = options;
     return this.observe(
       "fetch_agents_response",
-      { ...query, type: "fetch_agents_request", subscribe: {} },
+      {
+        type: "fetch_agents_request",
+        subscribe: {},
+        ...(filter === undefined ? {} : { filter }),
+        ...(includeBackground === undefined ? {} : { includeBackground }),
+      },
       { signal, requestId, timeout },
     );
   }
@@ -2742,10 +2752,15 @@ export class DaemonClient {
   ): OwnedSubscription<FetchWorkspacesPayload> {
     if (options.includeBackground || options.filter?.includeBackground)
       this.requireBackgroundWorkspaces();
-    const { signal, requestId, ...query } = options;
+    const { signal, requestId, filter, includeBackground } = options;
     return this.observe(
       "fetch_workspaces_response",
-      { ...query, type: "fetch_workspaces_request", subscribe: {} },
+      {
+        type: "fetch_workspaces_request",
+        subscribe: {},
+        ...(filter === undefined ? {} : { filter }),
+        ...(includeBackground === undefined ? {} : { includeBackground }),
+      },
       { signal, requestId },
     );
   }
@@ -4580,17 +4595,18 @@ export class DaemonClient {
       : { mode: compare.mode, baseRef: trimmedBaseRef };
   }
 
-  async getCheckoutDiff(
+  getCheckoutDiff(
     cwd: string,
     compare: { mode: "uncommitted" | "base" | "all"; baseRef?: string; ignoreWhitespace?: boolean },
     requestId?: string,
   ): Promise<CheckoutDiffPayload> {
+    const message = {
+      type: "checkout.diff.get.request" as const,
+      cwd,
+      compare: this.normalizeCheckoutDiffCompare(compare),
+    };
     return this.sendCorrelatedSessionRequest({
-      message: {
-        type: "checkout.diff.get.request",
-        cwd,
-        compare: this.normalizeCheckoutDiffCompare(compare),
-      },
+      message,
       responseType: "checkout.diff.get.response",
       requestId,
     });
@@ -6875,16 +6891,12 @@ export class DaemonClient {
     const rawData =
       data && typeof data === "object" && "data" in data ? (data as { data: unknown }).data : data;
 
-    if (
-      typeof Blob !== "undefined" &&
-      rawData instanceof Blob &&
-      typeof rawData.arrayBuffer === "function"
-    ) {
+    if (typeof Blob !== "undefined" && rawData instanceof Blob) {
       const transport = this.transport;
-      void rawData
+      void new Response(rawData)
         .arrayBuffer()
         .then((buffer) => {
-          if (this.transport === transport) this.handleTransportMessage(buffer);
+          if (this.transport === transport) this.handleTransportMessage(new Uint8Array(buffer));
           return;
         })
         .catch(() => {
@@ -7416,11 +7428,11 @@ export class DaemonClient {
       try {
         const result = waiter.predicate(msg);
         if (result === null) continue;
-        this.waiters.delete(waiter);
+        dropWaiter(this.waiters, waiter);
         if (waiter.timeoutHandle) clearTimeout(waiter.timeoutHandle);
         waiter.resolve(result);
       } catch (error) {
-        this.waiters.delete(waiter);
+        dropWaiter(this.waiters, waiter);
         if (waiter.timeoutHandle) clearTimeout(waiter.timeoutHandle);
         waiter.reject(error instanceof Error ? error : new Error(String(error)));
       }
@@ -7432,7 +7444,7 @@ export class DaemonClient {
       if (waiter.requestId !== requestId) {
         continue;
       }
-      this.waiters.delete(waiter);
+      dropWaiter(this.waiters, waiter);
       if (waiter.timeoutHandle) {
         clearTimeout(waiter.timeoutHandle);
       }
@@ -7455,7 +7467,7 @@ export class DaemonClient {
           : error,
       );
     }
-    this.waiters.clear();
+    this.waiters.length = 0;
   }
 
   private toEvent(msg: SessionOutboundMessage): DaemonEvent | null {
@@ -7548,7 +7560,8 @@ export class DaemonClient {
         timeout > 0
           ? setTimeout(() => {
               if (waiter) {
-                this.waiters.delete(waiter);
+                const index = this.waiters.indexOf(waiter);
+                if (index >= 0) this.waiters.splice(index, 1);
               }
               wrappedReject(timeoutError);
             }, timeout)
@@ -7562,7 +7575,7 @@ export class DaemonClient {
         requestId: options?.requestId,
         submitted: false,
       };
-      this.waiters.add(waiter);
+      this.waiters.push(waiter);
     });
 
     const cancel = (error: Error) => {
@@ -7571,7 +7584,7 @@ export class DaemonClient {
       }
 
       if (waiter) {
-        this.waiters.delete(waiter);
+        dropWaiter(this.waiters, waiter);
         if (waiter.timeoutHandle) {
           clearTimeout(waiter.timeoutHandle);
         }

@@ -1,5 +1,9 @@
 import type { Logger } from "pino";
-import type { SessionConfigOption } from "@agentclientprotocol/sdk";
+import type {
+  SessionConfigOption,
+  SessionConfigSelectGroup,
+  SessionConfigSelectOption,
+} from "@agentclientprotocol/sdk";
 
 import type { AgentCapabilityFlags, AgentMode } from "../agent-sdk-types.js";
 import {
@@ -185,12 +189,17 @@ function flattenCopilotModeOptions(
   options: SelectConfigOption["options"],
 ): Array<{ value: string; name: string; description?: string | null }> {
   const flattened: Array<{ value: string; name: string; description?: string | null }> = [];
-  for (const option of options) {
+  // scriptc narrows with `in` only over an array of the element union, not a union of arrays,
+  // and spreads into push only arrays of the same element type.
+  const entries: Array<SessionConfigSelectOption | SessionConfigSelectGroup> = options;
+  for (const option of entries) {
     if ("value" in option) {
-      flattened.push(option);
+      // Through a local of the narrowed type: scriptc keeps the element's other arms otherwise.
+      const choice: SessionConfigSelectOption = option;
+      flattened.push(choice);
       continue;
     }
-    flattened.push(...option.options);
+    for (const groupOption of option.options) flattened.push(groupOption);
   }
   return flattened;
 }

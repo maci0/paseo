@@ -296,7 +296,7 @@ function rewriteAssignments(
 }
 
 function requireName(raw: string): string {
-  const name = normalizeWorkspaceLabelName(raw);
+  const name: string = normalizeWorkspaceLabelName(raw);
   if (name.length === 0) {
     throw new WorkspaceLabelError("label_name_empty", "Label name cannot be empty");
   }

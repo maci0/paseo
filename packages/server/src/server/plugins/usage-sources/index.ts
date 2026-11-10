@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import type { AgentUsageSession } from "../../agent/agent-sdk-types.js";
 import type { UsageScope } from "@getpaseo/plugin/server/usage";
 import { z } from "zod";
-import type { Logger } from "pino";
 import {
   UsageReportSchema,
   type ProviderUsage,
@@ -10,6 +9,12 @@ import {
   type UsageProblem,
   type UsageReport,
 } from "@getpaseo/protocol/messages";
+
+// The one pino method the registry uses. scriptc cannot dispatch pino's generic, overloaded
+// `warn` through `Pick<Logger, "warn">`.
+interface UsageLogger {
+  warn: (obj: object, msg: string) => void;
+}
 
 export interface UsageSource {
   id: string;
@@ -62,7 +67,7 @@ export class UsageSourceRegistry {
   constructor(
     private readonly now: () => number = Date.now,
     private readonly ttlMs = 300_000,
-    private readonly logger: Pick<Logger, "warn"> = { warn: console.warn },
+    private readonly logger: UsageLogger = { warn: (obj, msg) => console.warn(obj, msg) },
     private readonly agents: AgentUsageLookup = { hasAgent: () => false, usageSession: () => null },
     private readonly deadlineMs = 20_000,
   ) {}
@@ -274,20 +279,29 @@ export class UsageSourceRegistry {
       const fetchedAt = new Date(this.now()).toISOString();
       const outcome = await this.fetchWithFallback(known);
       const completedAt = new Date(this.now()).toISOString();
-      const entry: UsageReportEntry = {
-        id,
-        sourceId: known.source.id,
-        sourceLabel: known.source.label,
-        icon: known.source.icon,
-        account: { label: known.label },
-        fetchedAt,
-        ...outcome,
-      };
-      if (entry.report.status === "available") {
-        entry.successfulAt = completedAt;
-      } else {
-        entry.lastSuccessful = this.successful.get(cacheKey);
-      }
+      // Built whole: scriptc cannot assign a field of this protocol record after creation.
+      const entry: UsageReportEntry =
+        outcome.report.status === "available"
+          ? {
+              id,
+              sourceId: known.source.id,
+              sourceLabel: known.source.label,
+              icon: known.source.icon,
+              account: { label: known.label },
+              fetchedAt,
+              ...outcome,
+              successfulAt: completedAt,
+            }
+          : {
+              id,
+              sourceId: known.source.id,
+              sourceLabel: known.source.label,
+              icon: known.source.icon,
+              account: { label: known.label },
+              fetchedAt,
+              ...outcome,
+              lastSuccessful: this.successful.get(cacheKey),
+            };
       if (
         this.sources.get(known.source.id) === known.source &&
         this.activeCacheKeys().has(cacheKey)

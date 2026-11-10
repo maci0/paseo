@@ -61,7 +61,11 @@ describe("Claude SDK env", () => {
             child.stdout.on("data", (chunk: Buffer) => {
               output += chunk.toString();
             });
-            exited = once(child, "close");
+            // The launcher returns the SDK's SpawnedProcess, which reports exit but not close.
+            const exit = new Promise<unknown[]>((resolve) => {
+              child.once("exit", (code, signal) => resolve([code, signal]));
+            });
+            exited = Promise.all([exit, once(child.stdout, "end")]).then(([status]) => status);
             return createQueryMock([]);
           },
         },

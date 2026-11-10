@@ -23,6 +23,7 @@ type ExceptionalReply = Exclude<
   ConventionalReply<Request["type"]> | "rpc_error"
 >;
 
+// Empty lists are typed so scriptc gives every entry the same string[] layout.
 // Naming is a protocol convention, not proof. Every nonconforming correlated output
 // must declare its originating request; additions to the wire union fail typecheck here.
 const exceptions = {
@@ -34,9 +35,9 @@ const exceptions = {
   "usage.list_reports.update": ["usage.list_reports.request"],
   "daemon.update.progress": ["daemon.update.request"],
   // Transcription belongs to the explicitly retained voice operation, not a request ID.
-  transcription_result: [],
+  transcription_result: [] as Request["type"][],
   // This legacy requestId is a producer marker; checkout updates require event demand.
-  checkout_status_update: [],
+  checkout_status_update: [] as Request["type"][],
 } satisfies Record<ExceptionalReply, readonly Request["type"][]>;
 const statuses = {
   agent_created: ["create_agent_request"],

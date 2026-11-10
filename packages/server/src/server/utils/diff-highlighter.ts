@@ -1,5 +1,4 @@
-import { open } from "node:fs/promises";
-import { constants } from "node:fs";
+import { openReadNonBlocking } from "../../utils/open-nonblocking.js";
 import { setImmediate } from "node:timers/promises";
 import { resolve } from "node:path";
 import {
@@ -29,6 +28,7 @@ export interface DiffHunk {
 
 export interface ParsedDiffFile {
   path: string;
+  oldPath?: string;
   isNew: boolean;
   isDeleted: boolean;
   additions: number;
@@ -285,7 +285,7 @@ async function buildFullFileTokenLookup(
   signal?: AbortSignal,
 ): Promise<Map<number, HighlightToken[]> | null> {
   const highlighted = await highlightCodeWithBudget(fileContent, path, {
-    yieldToEventLoop: setImmediate,
+    yieldToEventLoop: () => setImmediate(),
     signal,
   });
   if (!highlighted) return null;
@@ -295,7 +295,7 @@ async function buildFullFileTokenLookup(
 async function readHighlightSource(path: string): Promise<string | null> {
   let handle;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    handle = await openReadNonBlocking(path);
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > HIGHLIGHT_MAX_SOURCE_BYTES) return null;
     const buffer = Buffer.alloc(Math.min(stat.size, HIGHLIGHT_MAX_SOURCE_BYTES) + 1);
@@ -335,7 +335,7 @@ async function buildBudgetedReconstructedTokens(file: ParsedDiffFile, signal?: A
       if (bytes > HIGHLIGHT_MAX_SOURCE_BYTES) return null;
     }
     const highlighted = await highlightCodeWithBudget(buildFileContent(lines), file.path, {
-      yieldToEventLoop: setImmediate,
+      yieldToEventLoop: () => setImmediate(),
       signal,
     });
     return highlighted ? buildTokenLookup(lines, highlighted) : null;

@@ -588,26 +588,27 @@ export class VoiceAssistantWebSocketServer {
   private readonly pushNotifications: PushNotifications;
   private readonly pushNotificationSender: PushNotificationSender;
   private readonly mcpBaseUrl: string | null;
-  private speech!: SpeechService | null;
-  private terminalManager!: TerminalManager | null;
-  private serviceProxy!: ServiceProxySubsystem | null;
-  private scriptRuntimeStore!: WorkspaceScriptRuntimeStore | null;
-  private getDaemonTcpPort!: (() => number | null) | null;
-  private getDaemonTcpHost!: (() => string | null) | null;
-  private serviceProxyPublicBaseUrl!: string | null;
-  private resolveScriptHealth!: ((hostname: string) => ScriptHealthState | null) | null;
-  private dictation!: {
+  // Initialized to null, not `!`: scriptc refuses definite assignment past construction.
+  private speech: SpeechService | null = null;
+  private terminalManager: TerminalManager | null = null;
+  private serviceProxy: ServiceProxySubsystem | null = null;
+  private scriptRuntimeStore: WorkspaceScriptRuntimeStore | null = null;
+  private getDaemonTcpPort: (() => number | null) | null = null;
+  private getDaemonTcpHost: (() => string | null) | null = null;
+  private serviceProxyPublicBaseUrl: string | null = null;
+  private resolveScriptHealth: ((hostname: string) => ScriptHealthState | null) | null = null;
+  private dictation: {
     finalTimeoutMs?: number;
-  } | null;
+  } | null = null;
   private readonly voiceSpeakHandlers = new Map<string, VoiceSpeakHandler>();
   private readonly voiceCallerContexts = new Map<string, VoiceCallerContext>();
   private readonly workspaceSetupObservation = new WorkspaceSetupObservation();
   private readonly workspaceSetupRuntime: WorkspaceSetupRuntime;
   private readonly providerSnapshotManager: ProviderSnapshotManager;
-  private onLifecycleIntent!: ((intent: SessionLifecycleIntent) => void) | null;
-  private onBranchChanged!:
+  private onLifecycleIntent: ((intent: SessionLifecycleIntent) => void) | null = null;
+  private onBranchChanged:
     | ((workspaceId: string, oldBranch: string | null, newBranch: string | null) => void)
-    | null;
+    | null = null;
   private serverCapabilities: ServerCapabilities | undefined;
   private readonly runtimeMetrics = new WebSocketRuntimeMetricsWindow();
   private lastRuntimeMetricsSnapshot: WebSocketRuntimeDiagnosticPayload | null = null;
@@ -905,7 +906,7 @@ export class VoiceAssistantWebSocketServer {
       this.flushRuntimeMetrics();
     }, WS_RUNTIME_METRICS_FLUSH_MS);
     this.runtimeMetricsInterval = runtimeMetricsInterval;
-    (runtimeMetricsInterval as unknown as { unref?: () => void }).unref?.();
+    runtimeMetricsInterval.unref();
   }
 
   private startApplicationSocketLeaseInterval(): void {
@@ -918,7 +919,7 @@ export class VoiceAssistantWebSocketServer {
       }
     }, APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS);
     this.applicationSocketLeaseInterval = interval;
-    (interval as unknown as { unref?: () => void }).unref?.();
+    interval.unref();
   }
 
   // Main-loop stall visibility: terminal frames and agent traffic share one event
@@ -1026,7 +1027,7 @@ export class VoiceAssistantWebSocketServer {
       }
       return;
     }
-    this.sendMessageToSockets(this.sessions.keys(), message);
+    this.sendMessageToSockets([...this.sessions.keys()], message);
   }
 
   public listSessions(): Session[] {
@@ -1157,7 +1158,8 @@ export class VoiceAssistantWebSocketServer {
     }
     this.applicationSocketLease.clear();
     this.flushRuntimeMetrics({ final: true });
-    this.eventLoopDelayMonitor?.disable();
+    const eventLoopDelayMonitor = this.eventLoopDelayMonitor;
+    if (eventLoopDelayMonitor) eventLoopDelayMonitor.disable();
     this.eventLoopDelayMonitor = null;
 
     const uniqueConnections = new Set<SessionConnection>([
@@ -1224,8 +1226,9 @@ export class VoiceAssistantWebSocketServer {
     this.sendMessageToSockets([ws], message, true);
   }
 
+  // Arrays, not Iterable: scriptc cannot pass an Iterable interface value.
   private sendMessageToSockets(
-    sockets: Iterable<WebSocketLike>,
+    sockets: readonly WebSocketLike[],
     message: WSOutboundMessage,
     reportRejection = false,
   ): void {
@@ -1239,7 +1242,7 @@ export class VoiceAssistantWebSocketServer {
   }
 
   private prepareJsonDelivery(
-    sockets: Iterable<WebSocketLike>,
+    sockets: readonly WebSocketLike[],
     message: WSOutboundMessage,
     reportRejection: boolean,
   ): { sockets: WebSocketLike[]; payload: string; bytes: number } | null {
@@ -1452,7 +1455,7 @@ export class VoiceAssistantWebSocketServer {
   }
 
   private sendToConnection(connection: SessionConnection, message: WSOutboundMessage): void {
-    this.sendMessageToSockets(connection.sockets, message);
+    this.sendMessageToSockets([...connection.sockets], message);
   }
 
   private sendBinaryToConnection(connection: SessionConnection, frame: Uint8Array): void {
@@ -1510,7 +1513,7 @@ export class VoiceAssistantWebSocketServer {
       }
     }, HELLO_TIMEOUT_MS);
     pending.helloTimeout = timeout;
-    (timeout as unknown as { unref?: () => void }).unref?.();
+    timeout.unref();
 
     this.pendingConnections.set(ws, pending);
     this.incrementRuntimeCounter("connectedAwaitingHello");
@@ -2750,7 +2753,8 @@ export class VoiceAssistantWebSocketServer {
   }
 
   private collectSessionRuntimeMetrics(): WebSocketRuntimeMetrics {
-    const uniqueConnections = new Set<SessionConnection>(this.externalSessionsByKey.values());
+    // The map's own value type: scriptc cannot seed a Set of the SessionConnection union.
+    const uniqueConnections = new Set(this.externalSessionsByKey.values());
     let terminalDirectorySubscriptionCount = 0;
     let terminalSubscriptionCount = 0;
     let workspaceGitWatchedDirectoryCount = 0;

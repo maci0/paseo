@@ -7,13 +7,11 @@ type CoalescableTextKind = "assistant_message" | "reasoning";
 type CoalescableTimelineKind = CoalescableTextKind | "tool_call";
 type CoalescableTextItem = Extract<AgentTimelineItem, { type: CoalescableTextKind }>;
 type CoalescableTimelineItem = Extract<AgentTimelineItem, { type: CoalescableTimelineKind }>;
-type CoalescableTimelineEvent = Extract<AgentStreamEvent, { type: "timeline" }> & {
-  item: CoalescableTimelineItem;
-};
+type ToolCallTimelineItem = Extract<AgentTimelineItem, { type: "tool_call" }>;
 
 export interface AgentStreamCoalescerTimers {
   setTimeout: (callback: () => void, ms?: number) => ReturnType<typeof setTimeout>;
-  clearTimeout: typeof clearTimeout;
+  clearTimeout: (timer: ReturnType<typeof setTimeout>) => void;
 }
 
 export interface AgentStreamCoalescerFlush {
@@ -56,24 +54,8 @@ interface PendingAgentStreamBuffer {
   lastFlushAt: number | null;
 }
 
-function isCoalescableTimelineEvent(event: AgentStreamEvent): event is CoalescableTimelineEvent {
-  return (
-    event.type === "timeline" &&
-    (event.item.type === "assistant_message" ||
-      event.item.type === "reasoning" ||
-      event.item.type === "tool_call")
-  );
-}
-
-function isTextTimelineItem(item: CoalescableTimelineItem): item is CoalescableTextItem {
-  return item.type === "assistant_message" || item.type === "reasoning";
-}
-
-function isTerminalToolCall(item: CoalescableTimelineItem): boolean {
-  return (
-    item.type === "tool_call" &&
-    (item.status === "completed" || item.status === "failed" || item.status === "canceled")
-  );
+function isTerminalToolCall(item: ToolCallTimelineItem): boolean {
+  return item.status === "completed" || item.status === "failed" || item.status === "canceled";
 }
 
 function isSameTextStream(previous: PendingTextEntry, next: PendingTextEntry): boolean {
@@ -101,20 +83,28 @@ export class AgentStreamCoalescer {
   }
 
   handle(agentId: string, event: AgentStreamEvent): boolean {
-    if (!isCoalescableTimelineEvent(event)) {
+    // Narrowed by discriminant checks and passed as parts: scriptc does not narrow through
+    // type predicates or convert the whole event to a narrower record type.
+    if (event.type !== "timeline") {
       return false;
     }
-
-    if (isTextTimelineItem(event.item) && event.item.text === "") {
-      return true;
-    }
-
-    const buffer = this.getOrCreateBuffer(agentId);
-    this.appendToBuffer(buffer, event);
-
-    if (isTerminalToolCall(event.item)) {
-      this.flushBuffer(agentId);
-      return true;
+    const item = event.item;
+    let buffer: PendingAgentStreamBuffer;
+    if (item.type === "assistant_message" || item.type === "reasoning") {
+      if (item.text === "") {
+        return true;
+      }
+      buffer = this.getOrCreateBuffer(agentId);
+      this.appendTextToBuffer(buffer, item, event.provider, event.turnId);
+    } else if (item.type === "tool_call") {
+      buffer = this.getOrCreateBuffer(agentId);
+      this.appendToolCallToBuffer(buffer, item, event.provider, event.turnId);
+      if (isTerminalToolCall(item)) {
+        this.flushBuffer(agentId);
+        return true;
+      }
+    } else {
+      return false;
     }
 
     // Leading edge: the first event after an idle window flushes synchronously so
@@ -171,31 +161,40 @@ export class AgentStreamCoalescer {
     return buffer;
   }
 
-  private appendToBuffer(buffer: PendingAgentStreamBuffer, event: CoalescableTimelineEvent): void {
-    if (isTextTimelineItem(event.item)) {
-      buffer.entries.push({
-        kind: "text",
-        item: event.item,
-        text: event.item.text,
-        provider: event.provider,
-        ...(event.turnId !== undefined ? { turnId: event.turnId } : {}),
-      });
-      return;
-    }
+  private appendTextToBuffer(
+    buffer: PendingAgentStreamBuffer,
+    item: CoalescableTextItem,
+    provider: AgentProvider,
+    turnId: string | undefined,
+  ): void {
+    buffer.entries.push({
+      kind: "text",
+      item,
+      text: item.text,
+      provider,
+      ...(turnId !== undefined ? { turnId } : {}),
+    });
+  }
 
-    const existingIndex = buffer.toolCallEntryIndexes.get(event.item.callId);
+  private appendToolCallToBuffer(
+    buffer: PendingAgentStreamBuffer,
+    eventItem: ToolCallTimelineItem,
+    provider: AgentProvider,
+    turnId: string | undefined,
+  ): void {
+    const existingIndex = buffer.toolCallEntryIndexes.get(eventItem.callId);
     const existing = existingIndex !== undefined ? buffer.entries[existingIndex] : undefined;
     // Merge rather than replace, so an update that carries less (an unknown detail after a
     // labeled one) cannot erase what the timeline would have kept had both been flushed.
-    let item = event.item;
+    let item = eventItem;
     if (existing?.kind === "tool_call") {
-      item = mergeToolCallItems(existing.item, event.item);
+      item = mergeToolCallItems(existing.item, eventItem);
     }
     const entry: PendingToolCallEntry = {
       kind: "tool_call",
       item,
-      provider: event.provider,
-      ...(event.turnId !== undefined ? { turnId: event.turnId } : {}),
+      provider,
+      ...(turnId !== undefined ? { turnId } : {}),
     };
 
     if (existingIndex !== undefined) {
@@ -203,7 +202,7 @@ export class AgentStreamCoalescer {
       return;
     }
 
-    buffer.toolCallEntryIndexes.set(event.item.callId, buffer.entries.length);
+    buffer.toolCallEntryIndexes.set(eventItem.callId, buffer.entries.length);
     buffer.entries.push(entry);
   }
 

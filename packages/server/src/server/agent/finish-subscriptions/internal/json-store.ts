@@ -14,10 +14,23 @@ const recordsSchema = z.array(
   }),
 );
 
+// scriptc lowers only top-level generic functions, so the queue state is passed in.
+interface WriteQueue {
+  tail: Promise<void>;
+}
+function serialized<T>(queue: WriteQueue, action: () => Promise<T>): Promise<T> {
+  const result = queue.tail.then(action);
+  queue.tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
 export function createJsonFinishSubscriptionStore(paseoHome: string): FinishSubscriptionStore {
   const file = join(paseoHome, "finish-subscriptions.json");
   let records: FinishSubscription[] | undefined;
-  let pending = Promise.resolve();
+  const pending: WriteQueue = { tail: Promise.resolve() };
   async function load(): Promise<FinishSubscription[]> {
     if (records) return records;
     try {
@@ -28,14 +41,6 @@ export function createJsonFinishSubscriptionStore(paseoHome: string): FinishSubs
     }
     return records;
   }
-  function serialized<T>(action: () => Promise<T>): Promise<T> {
-    const result = pending.then(action);
-    pending = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
   async function mutate(
     update: (current: FinishSubscription[]) => FinishSubscription[],
   ): Promise<void> {
@@ -44,15 +49,16 @@ export function createJsonFinishSubscriptionStore(paseoHome: string): FinishSubs
     records = next;
   }
   return {
-    list: () => serialized(async () => (await load()).map((record) => Object.assign({}, record))),
+    list: () =>
+      serialized(pending, async () => (await load()).map((record) => Object.assign({}, record))),
     put: (subscription) =>
-      serialized(() =>
+      serialized(pending, () =>
         mutate((current) => [
           ...current.filter((record) => record.id !== subscription.id),
           { ...subscription },
         ]),
       ),
     remove: (id) =>
-      serialized(() => mutate((current) => current.filter((record) => record.id !== id))),
+      serialized(pending, () => mutate((current) => current.filter((record) => record.id !== id))),
   };
 }

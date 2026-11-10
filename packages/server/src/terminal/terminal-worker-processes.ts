@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { execCommand } from "../utils/spawn.js";
@@ -14,6 +15,9 @@ import {
 // under different locales. Every `ps` here runs under LC_ALL=C.
 
 const PS_TIMEOUT_MS = 15_000;
+const PS_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+// process.argv[0] in a scriptc binary.
+const SCRIPTC_ARGV0 = "scriptc";
 const POSIX_LSTART_WIDTH = 24;
 
 export interface ProcessTableEntry {
@@ -46,14 +50,72 @@ const WindowsProcessListSchema = z.array(
 );
 
 function createLocaleNeutralCommandRunner(): ManagedProcessCommandRunner {
+  if (process.argv[0] === SCRIPTC_ARGV0) return createNativeLocaleNeutralCommandRunner();
   return {
     exec: (command, args) =>
       execCommand(command, args, {
         envMode: "internal",
         envOverlay: { LC_ALL: "C" },
         timeout: PS_TIMEOUT_MS,
-        maxBuffer: 64 * 1024 * 1024,
+        maxBuffer: PS_MAX_BUFFER_BYTES,
       }).then(({ stdout, stderr }) => ({ stdout: String(stdout), stderr: String(stderr) })),
+  };
+}
+
+/** A command that ran and exited non-zero; `code` is numeric, as on execFile's error. */
+class CommandExitError extends Error {
+  readonly code: number;
+
+  // No parameter property: the worker runs this file under --experimental-strip-types.
+  constructor(message: string, code: number) {
+    super(message);
+    this.name = "CommandExitError";
+    this.code = code;
+  }
+}
+
+// execCommand goes through promisified execFile with `env` and `timeout`, which a scriptc
+// binary cannot run. This runner keeps its contract for the inspector: LC_ALL=C over the
+// daemon's environment, the timeout and output limit, and a numeric `code` on a non-zero exit.
+function createNativeLocaleNeutralCommandRunner(): ManagedProcessCommandRunner {
+  return {
+    exec: (command, args) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(command, args, {
+          env: { ...process.env, LC_ALL: "C" },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        let failure: Error | null = null;
+        const stop = (error: Error) => {
+          failure ??= error;
+          child.kill("SIGTERM");
+        };
+        const timer = setTimeout(
+          () => stop(new Error(`${command} timed out after ${PS_TIMEOUT_MS}ms`)),
+          PS_TIMEOUT_MS,
+        );
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          stdout += chunk;
+          if (stdout.length > PS_MAX_BUFFER_BYTES) stop(new Error(`${command} output too large`));
+        });
+        child.stderr?.setEncoding("utf8");
+        child.stderr?.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        child.once("error", (error: Error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+        child.once("close", (code: number | null) => {
+          clearTimeout(timer);
+          if (failure) reject(failure);
+          else if (code === 0) resolve({ stdout, stderr });
+          else reject(new CommandExitError(`Command failed: ${command}\n${stderr}`, code ?? 1));
+        });
+      }),
   };
 }
 

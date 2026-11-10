@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Command } from "commander";
 import { withOutput, type OutputSchema, type SingleResult } from "../../output/index.js";
@@ -78,11 +78,13 @@ export async function runHubExport(
 
   for (const file of files) {
     if (file.existing === file.trigger.yaml) continue;
-    await writeFile(
-      file.destination,
-      file.trigger.yaml,
-      file.existing === undefined ? { flag: "wx" } : undefined,
-    );
+    if (file.existing === undefined) {
+      const created = await open(file.destination, "wx");
+      await created.writeFile(file.trigger.yaml);
+      await created.close();
+    } else {
+      await writeFile(file.destination, file.trigger.yaml);
+    }
   }
 
   return {
@@ -109,9 +111,7 @@ export function addHubExportCommand(parent: Command, dependencies: HubExportDepe
         .option("--force", "Replace trigger files with different contents"),
     ),
   ).action(
-    withOutput(async (...args) => {
-      const directory = args[0] as string | undefined;
-      const options = args.at(-2) as HubExportOptions;
+    withOutput(async (directory?: string, options: HubExportOptions = {} as HubExportOptions) => {
       return runHubExport(directory, options, dependencies);
     }),
   );

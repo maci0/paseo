@@ -307,13 +307,18 @@ class ProviderRuntime {
     this.sessionListeners.clear();
     for (const request of this.requests.values()) request.reject(new Error("Provider closed"));
     this.requests.clear();
-    this.closePromise = Promise.all([
-      connection?.close(),
-      connecting?.then(
-        () => undefined,
-        () => undefined,
-      ),
-    ]).then(() => undefined);
+    // A Promise<void>[] with resolved promises in place of absent entries: scriptc lowers
+    // Promise.all only over entries of one promise type.
+    const closing: Promise<void>[] = [
+      connection ? connection.close() : Promise.resolve(),
+      connecting
+        ? connecting.then(
+            () => undefined,
+            () => undefined,
+          )
+        : Promise.resolve(),
+    ];
+    this.closePromise = Promise.all(closing).then(() => undefined);
     return this.closePromise;
   }
 

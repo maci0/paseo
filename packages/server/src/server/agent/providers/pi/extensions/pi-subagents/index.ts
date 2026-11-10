@@ -111,10 +111,13 @@ export const piSubagents: PiExtension = {
       const details = Details.safeParse(
         typeof call.result === "object" ? call.result?.details : null,
       );
-      if (!details.success || !details.data.completions) return undefined;
+      if (!details.success) return undefined;
+      // scriptc does not narrow a re-read of details.data.completions; bind it once.
+      const completions = details.data.completions;
+      if (!completions) return undefined;
       const subagents: NonNullable<PiExtensionToolMapping["subagents"]> = [];
       const childSessions: NonNullable<PiExtensionToolMapping["childSessions"]> = [];
-      for (const completion of details.data.completions) {
+      for (const completion of completions) {
         const owner = callsByRun.get(completion.runId);
         if (!owner) continue;
         const mapped = collectRows(owner, completion.results);

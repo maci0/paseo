@@ -176,7 +176,9 @@ export class AgentStorage {
       return undefined;
     });
 
-    const tracked = next.finally(() => {
+    // Declared before assignment: scriptc cannot capture a const inside its own initializer.
+    let tracked: Promise<void> = next;
+    tracked = next.finally(() => {
       if (this.pendingWrites.get(agentId) === tracked) {
         this.pendingWrites.delete(agentId);
       }
@@ -216,7 +218,8 @@ export class AgentStorage {
     await this.load();
     this.beginDelete(agentId);
     await (this.pendingWrites.get(agentId) ?? Promise.resolve());
-    const paths = Array.from(this.pathsById.get(agentId) ?? []);
+    const indexedPaths = this.pathsById.get(agentId);
+    const paths: string[] = indexedPaths ? Array.from(indexedPaths) : [];
     await Promise.all(
       paths.map(async (filePath) => {
         try {

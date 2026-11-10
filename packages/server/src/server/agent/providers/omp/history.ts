@@ -140,7 +140,8 @@ async function* replaySubagentTranscript(
   provider: AgentProvider,
   visitedSessionFiles: Set<string>,
 ): AsyncGenerator<AgentStreamEvent> {
-  const childEntries = await readActiveOmpEntryChain(transcript.sessionFile).catch(
+  // Annotated: scriptc has no `.at` on the inferred never[] | OmpSessionEntry[].
+  const childEntries: OmpSessionEntry[] = await readActiveOmpEntryChain(transcript.sessionFile).catch(
     (error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;

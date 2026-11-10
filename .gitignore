@@ -98,3 +98,7 @@ app.json
 
 # Project-local Serena configuration and memories.
 .serena/
+
+# Native entry directories, written by the turbopaseo Makefile
+packages/cli/native/
+packages/server/native/

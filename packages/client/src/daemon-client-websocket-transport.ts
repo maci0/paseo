@@ -75,6 +75,7 @@ export function createWebSocketTransportFactory(factory: WebSocketFactory): Daem
             drain();
           });
         }
+        return undefined;
       },
       close: (code?: number, reason?: string) => {
         // Node's `ws` may emit an `error` when a connecting socket is closed before the
@@ -162,23 +163,26 @@ export function bindWsHandler(
   event: "open" | "close" | "error" | "message",
   handler: (...args: unknown[]) => void,
 ): () => void {
+  const listener = (value: unknown) => {
+    handler(value);
+  };
   if (typeof ws.addEventListener === "function") {
-    ws.addEventListener(event, handler);
+    ws.addEventListener(event, listener);
     return () => {
       if (typeof ws.removeEventListener === "function") {
-        ws.removeEventListener(event, handler);
+        ws.removeEventListener(event, listener);
       }
     };
   }
   if (typeof ws.on === "function") {
-    ws.on(event, handler);
+    ws.on(event, listener);
     return () => {
       if (typeof ws.off === "function") {
-        ws.off(event, handler);
+        ws.off(event, listener);
         return;
       }
       if (typeof ws.removeListener === "function") {
-        ws.removeListener(event, handler);
+        ws.removeListener(event, listener);
       }
     };
   }

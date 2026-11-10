@@ -28,12 +28,33 @@ interface DirectorySnapshot {
   filesDiscoveredBeforeCoverage: Set<string>;
 }
 
+// The two FSWatcher operations this backend uses. scriptc cannot keep a native FSWatcher in a
+// Map or pass it through program functions, but it can hold one in a program class.
+interface DirectoryWatcher {
+  close(): void;
+  on(event: "error", listener: (error: Error) => void): unknown;
+}
+
+class FsDirectoryWatcher implements DirectoryWatcher {
+  constructor(private readonly watcher: FSWatcher) {}
+
+  close(): void {
+    this.watcher.close();
+  }
+
+  on(event: "error", listener: (error: Error) => void): this {
+    this.watcher.on(event, listener);
+    return this;
+  }
+}
+
 type WatchDirectory = (
   directory: string,
   listener: (eventType: string, filename: string | null) => void,
-) => FSWatcher;
+) => DirectoryWatcher;
 
-const watchDirectory: WatchDirectory = (directory, listener) => watch(directory, listener);
+const watchDirectory: WatchDirectory = (directory, listener) =>
+  new FsDirectoryWatcher(watch(directory, listener));
 
 export function createLinuxBackend(
   host: ObservationHost,
@@ -44,7 +65,7 @@ export function createLinuxBackend(
 }
 
 class LinuxBackend implements ObservationBackend {
-  private readonly watchers = new Map<string, FSWatcher>();
+  private readonly watchers = new Map<string, DirectoryWatcher>();
   private readonly classifications = new Set<Promise<void>>();
   private readonly classificationQueue: Array<{ path: string }> = [];
   private readonly pendingScopes = new Set<string>();
@@ -106,7 +127,8 @@ class LinuxBackend implements ObservationBackend {
   private async finishClose(): Promise<void> {
     await this.reconcileTail;
     this.classificationQueue.length = 0;
-    await Promise.allSettled(this.classifications);
+    // scriptc lowers Promise.allSettled over an array, not a Set.
+    await Promise.allSettled(Array.from(this.classifications));
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear();
   }
@@ -133,7 +155,7 @@ class LinuxBackend implements ObservationBackend {
     this.attachWatcher(directory, watcher);
   }
 
-  private attachWatcher(directory: string, watcher: FSWatcher): void {
+  private attachWatcher(directory: string, watcher: DirectoryWatcher): void {
     watcher.on("error", (error) => {
       if (!this.host.isActive()) return;
       if (this.paths.isExpectedWatchDisappearance(error)) {

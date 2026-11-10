@@ -378,7 +378,9 @@ export class HubRelationshipController implements HubRelationshipManagement {
     this.record = disconnecting;
     this.state = "disconnecting";
     if (waitForEnrollment && !input.force) {
-      await Promise.all(this.inFlightEnrollments);
+      // An array: scriptc lowers Promise.all only over Promise<T>[].
+      const enrollments: Promise<void>[] = [...this.inFlightEnrollments];
+      await Promise.all(enrollments);
     }
     let warning: string | undefined;
     if (!input.force) {

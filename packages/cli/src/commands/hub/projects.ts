@@ -83,8 +83,7 @@ export function addHubProjectsCommand(
         .option("--api-key <secret>", "Organization API key"),
     ),
   ).action(
-    withOutput(async (...args) => {
-      const options = args.at(-2) as HubProjectsOptions;
+    withOutput(async (options: HubProjectsOptions = {} as HubProjectsOptions) => {
       return runHubProjects(options, dependencies);
     }),
   );

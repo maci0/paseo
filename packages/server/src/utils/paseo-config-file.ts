@@ -1,8 +1,9 @@
-import { constants, type Stats } from "node:fs";
-import { open, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import pLimit from "p-limit";
 import { withTimeout } from "./promise-timeout.js";
+import { openReadNonBlocking } from "./open-nonblocking.js";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import {
@@ -130,7 +131,9 @@ class ProjectConfigOwner {
     if (activeRoots.has(root)) return root;
     let pending = this.pendingAliases.get(root);
     if (!pending) {
-      pending = this.filesystemOperations(() => realpath(root)).finally(() =>
+      // Called through a local: scriptc cannot call a p-limit function held in a field.
+      const filesystemOperations = this.filesystemOperations;
+      pending = filesystemOperations(() => realpath(root)).finally(() =>
         this.pendingAliases.delete(root),
       );
       this.pendingAliases.set(root, pending);
@@ -152,7 +155,8 @@ class ProjectConfigOwner {
     if (kind === "read" && previous?.kind === "read") return previous.promise as Promise<T>;
     const next = (async () => {
       await previous?.promise.catch(() => undefined);
-      return this.filesystemOperations(operation);
+      const filesystemOperations = this.filesystemOperations;
+      return filesystemOperations(operation);
     })();
     this.pending.set(root, { kind, promise: next });
     try {
@@ -189,10 +193,7 @@ class ProjectConfigOwner {
     if (stats) {
       // O_NONBLOCK prevents a regular-file -> FIFO replacement between stat and open
       // from waiting for a writer. Check the opened descriptor again before any read.
-      const handle = await open(
-        resolvePaseoConfigPath(root),
-        constants.O_RDONLY | constants.O_NONBLOCK,
-      );
+      const handle = await openReadNonBlocking(resolvePaseoConfigPath(root));
       try {
         const openedStats = await handle.stat();
         admit(openedStats);
@@ -241,7 +242,7 @@ class ProjectConfigOwner {
 
   async write(input: WritePaseoConfigForEditInput): Promise<WritePaseoConfigForEditResult> {
     const root = resolve(input.repoRoot);
-    return this.serialized(root, "write", async () => {
+    return this.serialized(root, "write", async (): Promise<WritePaseoConfigForEditResult> => {
       const { edit: parsed } = await validateConfig(input.config);
       if (!parsed.success) return { ok: false, error: { code: "invalid_project_config" } };
       const content = `${JSON.stringify(parsed.data, null, 2)}\n`;

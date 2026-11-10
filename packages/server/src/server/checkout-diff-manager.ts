@@ -1,9 +1,10 @@
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type pino from "pino";
-import type { SubscribeCheckoutDiffRequest, SessionOutboundMessage } from "./messages.js";
+import type { SubscribeCheckoutDiffRequest } from "./messages.js";
 import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "./workspace-git-service.js";
 import { expandTilde } from "../utils/path.js";
-import { toCheckoutError } from "./checkout-git-utils.js";
+import { toCheckoutError, type CheckoutErrorPayload } from "./checkout-git-utils.js";
+import type { ParsedDiffFile } from "./utils/diff-highlighter.js";
 
 const CHECKOUT_DIFF_WATCH_DEBOUNCE_MS = 150;
 
@@ -14,10 +15,41 @@ type CheckoutDiffWorkspace = Pick<
 
 export type CheckoutDiffCompareInput = SubscribeCheckoutDiffRequest["compare"];
 
-export type CheckoutDiffSnapshotPayload = Omit<
-  Extract<SessionOutboundMessage, { type: "checkout_diff_update" }>["payload"],
-  "subscriptionId"
->;
+// Declared from server types, not as Omit<Extract<SessionOutboundMessage, ...>["payload"]>:
+// in the daemon program scriptc lowers that alias as an untyped value, and its IR stage
+// then fails on every method returning a promise of it (SC9001). The emit sites spread it
+// into checkout_diff_update messages, so tsc still checks it against the wire schema.
+export interface CheckoutDiffSnapshotPayload {
+  cwd: string;
+  files: ParsedDiffFile[];
+  error: CheckoutErrorPayload | null;
+  diffTooLarge?: boolean;
+}
+
+type CheckoutDiffListener = (snapshot: CheckoutDiffSnapshotPayload) => void;
+
+function addListener(
+  listeners: Map<number, CheckoutDiffListener>,
+  id: number,
+  listener: CheckoutDiffListener,
+): void {
+  for (const existing of listeners.values()) {
+    if (existing === listener) return;
+  }
+  listeners.set(id, listener);
+}
+
+function deleteListener(
+  listeners: Map<number, CheckoutDiffListener>,
+  listener: CheckoutDiffListener,
+): void {
+  for (const [id, existing] of listeners) {
+    if (existing === listener) {
+      listeners.delete(id);
+      return;
+    }
+  }
+}
 
 export interface CheckoutDiffMetrics {
   checkoutDiffTargetCount: number;
@@ -31,7 +63,8 @@ interface CheckoutDiffWatchTarget {
   cwd: string;
   diffCwd: string;
   compare: CheckoutDiffCompareInput;
-  listeners: Set<(snapshot: CheckoutDiffSnapshotPayload) => void>;
+  // scriptc has no Set of functions; a Map keyed by insertion id keeps Set semantics.
+  listeners: Map<number, CheckoutDiffListener>;
   workingTreeWatchUnsubscribe: (() => void) | null;
   workspaceGitUnsubscribe: (() => void) | null;
   latestWorkspaceStructureFingerprint: string | null;
@@ -62,6 +95,7 @@ export class CheckoutDiffManager {
   private readonly workspaceGitService: CheckoutDiffWorkspace;
   private readonly workspaceRuntimeStore: WorkspaceRuntimeStore;
   private readonly targets = new Map<string, CheckoutDiffWatchTarget>();
+  private nextListenerId = 0;
 
   constructor(options: {
     logger: pino.Logger;
@@ -86,7 +120,7 @@ export class CheckoutDiffManager {
     const cwd = params.cwd;
     const compare = this.normalizeCompare(params.compare);
     const target = this.ensureTarget(cwd, compare);
-    target.listeners.add(listener);
+    addListener(target.listeners, this.nextListenerId++, listener);
     target.openPromise ??= this.openTarget(target);
 
     let isSubscribed = true;
@@ -227,7 +261,7 @@ export class CheckoutDiffManager {
     target: CheckoutDiffWatchTarget,
     listener: (snapshot: CheckoutDiffSnapshotPayload) => void,
   ): void {
-    target.listeners.delete(listener);
+    deleteListener(target.listeners, listener);
     if (target.listeners.size > 0) {
       return;
     }
@@ -317,7 +351,7 @@ export class CheckoutDiffManager {
         const fingerprint = JSON.stringify(snapshot);
         if (fingerprint !== target.latestFingerprint) {
           target.latestFingerprint = fingerprint;
-          for (const listener of target.listeners) {
+          for (const listener of target.listeners.values()) {
             listener(snapshot);
           }
         }
@@ -344,7 +378,7 @@ export class CheckoutDiffManager {
       cwd,
       diffCwd: cwd,
       compare,
-      listeners: new Set(),
+      listeners: new Map(),
       workingTreeWatchUnsubscribe: null,
       workspaceGitUnsubscribe: null,
       latestWorkspaceStructureFingerprint: null,

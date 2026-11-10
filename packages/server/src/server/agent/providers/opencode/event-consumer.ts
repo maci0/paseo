@@ -281,13 +281,15 @@ export class OpenCodeEventConsumer implements OpenCodeEventSource {
       retryDelayMs,
       everReady: this.connected,
     };
-    const log =
+    const message = "OpenCode event stream connection failed; retrying";
+    // scriptc cannot bind the logger methods; call the chosen one directly.
+    if (
       result.outcome === "watchdog" ||
       this.connected ||
       consecutiveFailures >= FAILURE_WARNING_ATTEMPT
-        ? this.logger.warn.bind(this.logger)
-        : this.logger.debug.bind(this.logger);
-    log(details, "OpenCode event stream connection failed; retrying");
+    )
+      this.logger.warn(details, message);
+    else this.logger.debug(details, message);
   }
 
   private exit(error: Error): void {

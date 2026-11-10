@@ -64,9 +64,7 @@ export function addHubLoginCommand(parent: Command, dependencies: HubLoginDepend
         .argument("[origin]", "Paseo Hub origin"),
     ),
   ).action(
-    withOutput(async (...args) => {
-      const origin = args[0] as string | undefined;
-      const options = args.at(-2) as CommandOptions;
+    withOutput(async (origin?: string, options: CommandOptions = { daemonTarget: { kind: "instance", home: "" } }) => {
       return runHubLogin(origin, options, dependencies);
     }),
   );

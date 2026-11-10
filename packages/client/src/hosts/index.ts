@@ -1,7 +1,7 @@
 import { MAX_HOST_CHANNEL_FRAME_BYTES } from "@getpaseo/protocol/binary-frames/index";
 import { safeRandomId } from "../daemon-client-transport-utils.js";
 import { DaemonClient } from "../daemon-client.js";
-import type { DaemonTransportFactory } from "../daemon-client-transport-types.js";
+import type { DaemonTransport, DaemonTransportFactory } from "../daemon-client-transport-types.js";
 import type { OwnedSubscription } from "../connection/index.js";
 import type { PaseoApi, createPaseoApi } from "../index.js";
 import type { HostAdd, HostUpdate, HostSummary, HostDirectory } from "@getpaseo/protocol/hosts";
@@ -64,30 +64,8 @@ export function createHostChannelTransport(
         if (frame.routeId === routeId) for (const handler of messages) handler(frame.payload, true);
       }),
     );
-    cleanups.push(
-      origin.subscribeConnectionStatus((connectionState) => {
-        if (connectionState.status !== "connected") close();
-      }),
-    );
-    let opening: Promise<string>;
-    if (first) opening = Promise.resolve(first);
-    else opening = link ? origin.openHostLink(scopeId) : origin.openHostRoute(serverId, scopeId);
-    first = null;
-    void opening
-      .then((id) => {
-        if (closed) {
-          origin.closeHostRoute(id);
-          return;
-        }
-        routeId = id;
-        for (const handler of opens) handler();
-        return undefined;
-      })
-      .catch(close);
-    return {
-      get supportsDrain() {
-        return origin.supportsDrain;
-      },
+    const channel: DaemonTransport = {
+      supportsDrain: origin.supportsDrain,
       maxFrameBytes: MAX_HOST_CHANNEL_FRAME_BYTES,
       send(data) {
         if (closed || !routeId)
@@ -118,6 +96,28 @@ export function createHostChannelTransport(
         return () => messages.delete(handler);
       },
     };
+    cleanups.push(
+      origin.subscribeConnectionStatus((connectionState) => {
+        channel.supportsDrain = origin.supportsDrain;
+        if (connectionState.status !== "connected") close();
+      }),
+    );
+    let opening: Promise<string>;
+    if (first) opening = Promise.resolve(first);
+    else opening = link ? origin.openHostLink(scopeId) : origin.openHostRoute(serverId, scopeId);
+    first = null;
+    void opening
+      .then((id) => {
+        if (closed) {
+          origin.closeHostRoute(id);
+          return;
+        }
+        routeId = id;
+        for (const handler of opens) handler();
+        return undefined;
+      })
+      .catch(close);
+    return channel;
   };
 }
 

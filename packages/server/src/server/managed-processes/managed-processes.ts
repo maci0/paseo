@@ -129,7 +129,7 @@ export function createSystemManagedProcessTable(options?: {
   return new SystemManagedProcessTable({
     platform: options?.platform ?? process.platform,
     commandRunner: options?.commandRunner ?? {
-      exec: execCommand,
+      exec: (command: string, args: string[]) => execCommand(command, args),
     },
   });
 }
@@ -424,7 +424,10 @@ export function createPidTarget(pid: number): TreeKillTarget {
     exitCode: null,
     signalCode: null,
     kill(signal?: NodeJS.Signals | number) {
-      process.kill(pid, signal);
+      // Narrowed per call: scriptc lowers process.kill only with a string or a number signal.
+      if (signal === undefined) process.kill(pid);
+      else if (typeof signal === "number") process.kill(pid, signal);
+      else process.kill(pid, signal);
       return true;
     },
     // The reaper has no ChildProcess handle for a leftover from a previous

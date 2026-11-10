@@ -74,6 +74,10 @@ import { launchTerminalWorker, TerminalWorkerLaunchError } from "./terminal-work
 
 type TerminalRow = TerminalState["grid"][number];
 
+function rethrowFrameError(error: Error): never {
+  throw error;
+}
+
 function nodeTerminalCommand(script: string): { command: string; args: string[] } {
   return {
     command: process.execPath,
@@ -171,6 +175,14 @@ class FakeTerminalWorker extends EventEmitter {
   disconnect(): void {
     this.connected = false;
     this.emit("close");
+  }
+
+  onMessage(listener: (message: TerminalWorkerToParentMessage) => void): void {
+    this.on("message", listener);
+  }
+
+  onClose(listener: () => void): void {
+    this.on("close", listener);
   }
 
   emitWorkerMessage(message: TerminalWorkerToParentMessage): void {
@@ -1928,38 +1940,46 @@ it("completes a replay larger than the socket budget while a sibling stays usabl
   let cancelledReplayBegan = false;
   let existingLiveOutput = "";
   const replayOrder: string[] = [];
-  const framed = attachFramedSocket(socket, (value) => {
-    const message = value as TerminalWorkerToParentMessage | { type: "helloAck" };
-    if (
-      message.type === "terminalMessage" &&
-      message.terminalId === terminal.id &&
-      message.message.type === "output"
-    ) {
-      existingLiveOutput += message.message.data;
-      replayOrder.push("live");
-    }
-    if (message.type === "helloAck") {
-      framed.send({ type: "replayTerminal", terminalId: terminal.id, requestId: "stalled-replay" });
-    } else if (message.type === "terminalReplay") {
-      if (message.requestId === "cancelled-replay") {
+  const framed = attachFramedSocket(
+    socket,
+    (value) => {
+      const message = value as TerminalWorkerToParentMessage | { type: "helloAck" };
+      if (
+        message.type === "terminalMessage" &&
+        message.terminalId === terminal.id &&
+        message.message.type === "output"
+      ) {
+        existingLiveOutput += message.message.data;
+        replayOrder.push("live");
+      }
+      if (message.type === "helloAck") {
+        framed.send({
+          type: "replayTerminal",
+          terminalId: terminal.id,
+          requestId: "stalled-replay",
+        });
+      } else if (message.type === "terminalReplay") {
+        if (message.requestId === "cancelled-replay") {
+          if (message.event.type === "begin") {
+            cancelledReplayBegan = true;
+            socket.pause();
+          }
+          return;
+        }
         if (message.event.type === "begin") {
-          cancelledReplayBegan = true;
+          began = true;
           socket.pause();
         }
-        return;
-      }
-      if (message.event.type === "begin") {
-        began = true;
-        socket.pause();
-      }
-      if (message.event.type === "data") resumedBytes += message.event.data.byteLength;
-      if (message.event.type === "end") {
-        ended = true;
-        replayOrder.push("end");
-      }
-    } else if (message.type === "response" && message.requestId === "stalled-replay")
-      completed = message.ok;
-  });
+        if (message.event.type === "data") resumedBytes += message.event.data.byteLength;
+        if (message.event.type === "end") {
+          ended = true;
+          replayOrder.push("end");
+        }
+      } else if (message.type === "response" && message.requestId === "stalled-replay")
+        completed = message.ok;
+    },
+    rethrowFrameError,
+  );
   try {
     framed.send({ type: "hello", secret: record!.secret, protocolVersion: 5 });
     await waitForCondition(() => began, 10000);

@@ -17,6 +17,11 @@ interface TranscriptEntry extends ClaudeReplayEntry {
   isSidechain?: unknown;
 }
 
+// scriptc stores no FileHandle as a Map value, but a record holding one.
+interface OpenTranscript {
+  handle: FileHandle;
+}
+
 interface RecordLocation {
   file: string;
   offset: number;
@@ -88,7 +93,7 @@ async function* locatedRecords(
 /** Indexed sources parse only their own records using descriptors owned by this replay. */
 function indexedRecords(
   locations: readonly RecordLocation[],
-  descriptors: ReadonlyMap<string, FileHandle>,
+  descriptors: ReadonlyMap<string, OpenTranscript>,
 ): AsyncIterable<TranscriptEntry> {
   return {
     async *[Symbol.asyncIterator]() {
@@ -97,7 +102,7 @@ function indexedRecords(
   };
   async function* readEntries(): AsyncGenerator<TranscriptEntry> {
     for (const location of locations) {
-      const fd = descriptors.get(location.file)!;
+      const fd = descriptors.get(location.file)!.handle;
       const buffer = Buffer.allocUnsafe(location.length);
       let read = 0;
       while (read < buffer.length) {
@@ -162,23 +167,26 @@ export async function withClaudeReplayHistory<T>(
   historyPath: string,
   consume: (history: ClaudeReplayHistory) => Promise<T>,
 ): Promise<T> {
-  const descriptors = new Map<string, FileHandle>();
+  const descriptors = new Map<string, OpenTranscript>();
   try {
     return await consume(await indexHistory(historyPath, descriptors));
   } finally {
-    await closeReplaySources(descriptors.values());
+    await closeReplaySources(descriptors);
   }
 }
 
-async function closeReplaySources(descriptors: Iterable<FileHandle>): Promise<void> {
-  const results = await Promise.allSettled([...descriptors].map((fd) => fd.close()));
+async function closeReplaySources(descriptors: ReadonlyMap<string, OpenTranscript>): Promise<void> {
+  // A typed array local: scriptc lowers Promise.allSettled over no inline map() result.
+  const closing: Promise<void>[] = [];
+  for (const open of descriptors.values()) closing.push(open.handle.close());
+  const results = await Promise.allSettled(closing);
   const failure = results.find((result) => result.status === "rejected");
   if (failure) throw failure.reason;
 }
 
 async function indexHistory(
   historyPath: string,
-  descriptors: Map<string, FileHandle>,
+  descriptors: Map<string, OpenTranscript>,
 ): Promise<ClaudeReplayHistory> {
   const sessionDirectory = path.join(
     path.dirname(historyPath),
@@ -222,7 +230,7 @@ async function indexHistory(
     visit: (entry: TranscriptEntry, location: RecordLocation) => void,
   ): Promise<void> {
     const fd = await fs.open(file, "r");
-    descriptors.set(file, fd);
+    descriptors.set(file, { handle: fd });
     for await (const { entry, location } of locatedRecords(file, fd)) visit(entry, location);
   }
   for (const file of sidechainFiles) {

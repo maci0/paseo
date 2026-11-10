@@ -243,10 +243,13 @@ async function mergeBackupDirectory(livePath: string, backupPath: string | null)
         continue;
       }
       if (sourceInfo.isFile() && targetInfo.isFile()) {
-        const [sourceContents, targetContents] = await Promise.all([
-          readFile(source),
-          readFile(target),
-        ]);
+        // scriptc types Promise.all tuple elements as possibly undefined, which
+        // Buffer.equals cannot take, so the results are read from the promises.
+        const sourceRead = readFile(source);
+        const targetRead = readFile(target);
+        await Promise.all([sourceRead, targetRead]);
+        const sourceContents = await sourceRead;
+        const targetContents = await targetRead;
         if (
           !sourceContents.equals(targetContents) ||
           (sourceInfo.mode & 0o777) !== (targetInfo.mode & 0o777)
@@ -293,7 +296,7 @@ async function findQuarantinedEntry(
 ): Promise<string | null> {
   const base = recoveryBase(transactionDir, livePath, backupPath);
   const name = path.basename(base);
-  const matches = (await readdir(path.dirname(base)).catch(() => []))
+  const matches = (await readdir(path.dirname(base)).catch((): string[] => []))
     .filter((entry) => entry === name || entry.startsWith(`${name}-`))
     .map((entry) => path.join(path.dirname(base), entry))
     .filter((entry) => !claimed.has(entry))
@@ -360,7 +363,9 @@ async function undoSyncedDirectory(
     const target = path.join(livePath, rel);
     const current = await readFile(target).catch(() => null);
     const expected = expectedFiles.get(rel);
-    if (current === null || expected === undefined || !current.equals(expected)) continue;
+    // scriptc does not narrow `expected` inside the same `||` chain.
+    if (current === null || expected === undefined) continue;
+    if (!current.equals(expected)) continue;
     await restoreStagedEntry(livePath, backupPath, rel);
   }
 

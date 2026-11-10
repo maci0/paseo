@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { ToolCallTimelineItem } from "../../agent-sdk-types.js";
 import {
   extractCodexShellOutput,
+  nonEmptyString,
   normalizeToolCallStatus,
   truncateDiffText,
 } from "../tool-call-mapper-utils.js";
@@ -434,14 +435,7 @@ function asEditTextFields(text: string | undefined): { unifiedDiff?: string; new
 }
 
 function findToolCallEditPatchText(input: Record<string, unknown>): string | undefined {
-  return (
-    (typeof input.patch === "string" && input.patch) ||
-    (typeof input.diff === "string" && input.diff) ||
-    (typeof input.unified_diff === "string" && input.unified_diff) ||
-    (typeof input.unifiedDiff === "string" && input.unifiedDiff) ||
-    (typeof input.content === "string" && input.content) ||
-    undefined
-  );
+  return (nonEmptyString(input.patch) ?? nonEmptyString(input.diff) ?? nonEmptyString(input.unified_diff) ?? nonEmptyString(input.unifiedDiff) ?? nonEmptyString(input.content));
 }
 
 function findToolCallEditInputPath(
@@ -740,11 +734,7 @@ function parseFileChangePath(
 }
 
 function parseFileChangeKind(entry: Record<string, unknown>): string | undefined {
-  return (
-    (typeof entry.kind === "string" && entry.kind) ||
-    (typeof entry.type === "string" && entry.type) ||
-    undefined
-  );
+  return (nonEmptyString(entry.kind) ?? nonEmptyString(entry.type));
 }
 
 function parseFileChangeDiff(entry: Record<string, unknown>): string | undefined {

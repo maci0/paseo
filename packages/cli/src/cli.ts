@@ -1,12 +1,14 @@
 import { createHostCommand } from "./commands/host/index.js";
 import { pairCommand } from "./commands/daemon/pair.js";
 import { Command, Option } from "commander";
+
 import { createAgentCommand } from "./commands/agent/index.js";
 import { createDaemonCommand } from "./commands/daemon/index.js";
 import { createPermitCommand } from "./commands/permit/index.js";
 import { createUsageCommand } from "./commands/usage/index.js";
 import { createProviderCommand } from "./commands/provider/index.js";
 import { createPluginCommand } from "./commands/plugin/index.js";
+
 import { createProjectCommand } from "./commands/project/index.js";
 import { createScheduleCommand } from "./commands/schedule/index.js";
 import { createSpeechCommand } from "./commands/speech/index.js";
@@ -16,6 +18,7 @@ import { createWorktreeCommand } from "./commands/worktree/index.js";
 import { createWorkspaceCommand } from "./commands/workspace/index.js";
 import { createHeartbeatCommand } from "./commands/heartbeat/index.js";
 import { createHubCommand } from "./commands/hub/index.js";
+
 import { createHooksCommand } from "./commands/hooks.js";
 import { startCommand as daemonStartCommand } from "./commands/daemon/start.js";
 import { daemonStatusCommand } from "./commands/daemon/status.js";
@@ -129,11 +132,14 @@ export function createCli(): Command {
   program.addCommand(pairCommand());
 
   // Advanced agent commands (less common operations)
+
+
   program.addCommand(createAgentCommand());
 
   // Daemon commands
   program.addCommand(createDaemonCommand());
   program.addCommand(createHubCommand());
+
 
   // Chat commands
 
@@ -154,6 +160,7 @@ export function createCli(): Command {
   program.addCommand(createProviderCommand());
   program.addCommand(createUsageCommand());
   program.addCommand(createPluginCommand());
+
 
   // Speech model commands
   program.addCommand(createSpeechCommand());

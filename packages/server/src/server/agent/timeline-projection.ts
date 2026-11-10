@@ -119,7 +119,24 @@ export function mergeToolCallItems(
 
 function makeCanonicalEntries(rows: readonly AgentTimelineRow[]): WorkingEntry[] {
   return rows.map((row) => {
-    if ("seqStart" in row) return { ...(row as ProjectedTimelineRow) };
+    if ("seqStart" in row) {
+      // Copied field by field: scriptc cannot lower a spread of the cast row.
+      const projected = row as ProjectedTimelineRow;
+      const copy: ProjectedTimelineRow = {
+        seq: projected.seq,
+        item: projected.item,
+        timestamp: projected.timestamp,
+        ...(projected.turnId !== undefined ? { turnId: projected.turnId } : {}),
+        ...(projected.providerMessageId !== undefined
+          ? { providerMessageId: projected.providerMessageId }
+          : {}),
+        seqStart: projected.seqStart,
+        seqEnd: projected.seqEnd,
+        sourceSeqRanges: projected.sourceSeqRanges,
+        collapsed: projected.collapsed,
+      };
+      return copy;
+    }
     return {
       item: row.item,
       timestamp: row.timestamp,

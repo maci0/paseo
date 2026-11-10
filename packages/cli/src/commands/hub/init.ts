@@ -63,7 +63,11 @@ export interface HubGuidedSetupEnvironment {
   isInteractive?(): boolean;
   prompts?: {
     confirm(message: string, initialValue: boolean): Promise<boolean>;
-    select(options: Parameters<typeof select<string>>[0]): Promise<string>;
+    select(options: {
+      message: string;
+      options: { value: string; label: string; hint: string }[];
+      initialValue: string;
+    }): Promise<string>;
     text(options: Parameters<typeof text>[0]): Promise<string>;
     message(value: string): void;
   };
@@ -342,7 +346,7 @@ async function waitForDaemonReady(
   origin: string,
   environment: HubGuidedSetupEnvironment,
 ): Promise<string> {
-  return withSpinner("Waiting for the daemon to connect", async (reporter) =>
+  const daemonId = await withSpinner("Waiting for the daemon to connect", async (reporter) =>
     withHubDaemon(environment.daemon, environment.daemonTarget, async (daemon) => {
       const deadline = Date.now() + DAEMON_READY_TIMEOUT_MS;
       while (true) {
@@ -372,6 +376,13 @@ async function waitForDaemonReady(
       }
     }),
   );
+  if (typeof daemonId !== "string") {
+    throw new HubCommandError(
+      "HUB_DAEMON_CONNECTION_TIMEOUT",
+      "The daemon did not connect within 60 seconds. Check `paseo hub status`, then run Hub init again.",
+    );
+  }
+  return daemonId;
 }
 
 async function resolveStarterTriggerConnections(
@@ -446,7 +457,7 @@ async function waitForStarterAgentProviders(
   environment: HubGuidedSetupEnvironment,
   cwd: string,
 ): Promise<readonly HubStarterAgentProvider[]> {
-  return withSpinner("Discovering agent runtimes", async (reporter) =>
+  const discovered = await withSpinner("Discovering agent runtimes", async (reporter) =>
     withHubDaemon(environment.daemon, environment.daemonTarget, async (daemon) => {
       const deadline = Date.now() + PROVIDER_READY_TIMEOUT_MS;
       while (true) {
@@ -477,6 +488,13 @@ async function waitForStarterAgentProviders(
       }
     }),
   );
+  if (!Array.isArray(discovered)) {
+    throw new HubCommandError(
+      "HUB_AGENT_RUNTIME_REQUIRED",
+      "No usable agent runtime is available from this daemon. Configure an enabled provider with a selectable model, then run paseo hub init again.",
+    );
+  }
+  return discovered as readonly HubStarterAgentProvider[];
 }
 
 async function chooseStarterAgentProvider(
@@ -574,7 +592,7 @@ async function loadConfigurationResources(
   environment: HubGuidedSetupEnvironment,
 ): Promise<HubConfigurationResources> {
   try {
-    return await withSpinner("Loading Hub connections", () =>
+    const resources = await withSpinner("Loading Hub connections", () =>
       environment.hub.listConfigurationResources(
         origin,
         resolveHubCredential({
@@ -585,6 +603,7 @@ async function loadConfigurationResources(
         }),
       ),
     );
+    return resources as HubConfigurationResources;
   } catch (error) {
     if (
       error instanceof HubCommandError &&
@@ -699,14 +718,16 @@ export function githubRepositoryFromRemote(remote: string): string | undefined {
   }
 }
 
-async function withSpinner<T>(
+async function withSpinner(
   message: string,
-  action: (reporter: HubReporter) => Promise<T>,
-): Promise<T> {
+  action: (reporter: HubReporter) => Promise<unknown>,
+): Promise<unknown> {
   const progress = spinner();
   progress.start(message);
   try {
-    const result = await action({ progress: (nextMessage) => progress.message(nextMessage) });
+    const result: unknown = await action({
+      progress: (nextMessage) => progress.message(nextMessage),
+    });
     progress.stop(message);
     return result;
   } catch (error) {
@@ -749,14 +770,24 @@ async function requiredConfirm(
   return answer;
 }
 
-async function requiredSelect<T extends string>(
+async function requiredSelect(
   environment: HubGuidedSetupEnvironment,
-  options: Parameters<typeof select<T>>[0],
-): Promise<T> {
+  options: {
+    message: string;
+    initialValue?: string;
+    options: { value: string; label: string; hint?: string }[];
+  },
+): Promise<string> {
+  const choices: { value: string; label: string; hint: string }[] = [];
+  for (const option of options.options) {
+    choices.push({ value: option.value, label: option.label, hint: option.hint ?? "" });
+  }
+  const initialValue = options.initialValue ?? choices[0]?.value ?? "";
+  const prompt = { message: options.message, options: choices, initialValue };
   const answer =
     environment.prompts === undefined
-      ? await select<T>(options)
-      : ((await environment.prompts.select(options as Parameters<typeof select<string>>[0])) as T);
+      ? await select(prompt)
+      : await environment.prompts.select(prompt);
   if (isCancel(answer)) throw new HubInitCancelledError("Hub init cancelled.");
   return answer;
 }

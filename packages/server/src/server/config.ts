@@ -25,6 +25,7 @@ import { resolveSpeechConfig } from "./speech/speech-config-resolver.js";
 import { readSpeechSettings } from "./speech/speech-settings.js";
 import { mergeHostnames, parseHostnamesEnv, type HostnamesConfig } from "./hostnames.js";
 import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
+import { requireNodeOnly } from "./node-only-require.js";
 
 export {
   loadPersistedConfig,
@@ -46,6 +47,9 @@ interface ResolveBundledWebUiDistDirInput {
 }
 
 export function resolveBundledWebUiDistDir(input: ResolveBundledWebUiDistDirInput = {}): string {
+  // In a scriptc binary (process.argv[0] "scriptc") import.meta.url is the source path on the
+  // build machine, so the files ship beside the executable as web-ui/.
+  if (process.argv[0] === "scriptc") return path.join(path.dirname(process.execPath), "web-ui");
   const moduleUrl = input.moduleUrl ?? import.meta.url;
   const moduleDir = path.dirname(fileURLToPath(moduleUrl));
 
@@ -70,7 +74,16 @@ export function resolveBundledWebUiDistDir(input: ResolveBundledWebUiDistDirInpu
   return path.resolve(moduleDir, "web-ui");
 }
 
-const processResourcesPath = "resourcesPath" in process ? process.resourcesPath : undefined;
+// Electron sets process.resourcesPath. scriptc cannot read members it does not declare on
+// `process`, so Node reads them from the process module through requireNodeOnly; a
+// scriptc binary (process.argv[0] "scriptc") is never Electron.
+function readProcessResourcesPath(): unknown {
+  if (process.argv[0] === "scriptc") return undefined;
+  const nodeProcess = requireNodeOnly("node:process") as { resourcesPath?: unknown };
+  return nodeProcess.resourcesPath;
+}
+
+const processResourcesPath = readProcessResourcesPath();
 const BUNDLED_WEB_UI_DIST_DIR = resolveBundledWebUiDistDir({
   resourcesPath: typeof processResourcesPath === "string" ? processResourcesPath : undefined,
 });

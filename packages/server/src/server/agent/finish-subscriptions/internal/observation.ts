@@ -27,7 +27,9 @@ export function createFinishObservation(input: {
     local: {
       async wait(agentId, signal) {
         await input.waitForResume(agentId, signal);
-        await input.messages().waitForDispatch(agentId, signal);
+        // scriptc cannot call a method on a call result directly.
+        const delivery = input.messages();
+        await delivery.waitForDispatch(agentId, signal);
         signal.throwIfAborted();
         const live = agentManager.getAgent(agentId);
         if (!live) {

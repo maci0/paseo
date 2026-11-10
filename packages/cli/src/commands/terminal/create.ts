@@ -20,8 +20,14 @@ export async function runCreateCommand(
   const { client, close } = await connectTerminalClient(options.daemonTarget);
   try {
     const cwd = options.cwd ?? (options.workspace ? undefined : process.cwd());
-    const workspaceId =
-      options.workspace ?? (await client.workspaces.open(options.cwd ?? process.cwd())).id;
+    let openedId: string | undefined;
+    if (!options.workspace) {
+      const workspaces = client.workspaces;
+      const opened = await workspaces.open(options.cwd ?? process.cwd());
+      openedId = opened.id;
+    }
+    const workspaceId = options.workspace ?? openedId;
+    if (!workspaceId) throw new Error("The daemon did not open a workspace");
     const terminal = await client.terminals.create({
       workspaceId,
       cwd,

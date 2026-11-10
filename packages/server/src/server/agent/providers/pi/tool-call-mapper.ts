@@ -179,7 +179,12 @@ const PiToolResultObjectSchema = z
   })
   .passthrough();
 
-const PiToolResultSchema = z.union([z.string(), PiToolResultObjectSchema, z.null()]);
+// Typed as PiToolResult so scriptc need not map the inferred passthrough shapes onto it.
+const PiToolResultSchema: z.ZodType<PiToolResult> = z.union([
+  z.string(),
+  PiToolResultObjectSchema,
+  z.null(),
+]);
 
 const BashToolInputSchema: z.ZodType<BashToolInput> = z.object({
   command: z.string(),

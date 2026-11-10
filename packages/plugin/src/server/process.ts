@@ -12,7 +12,10 @@ import {
   quoteWindowsArgument,
   quoteWindowsCommand,
 } from "./process-internal/windows-command.js";
+import { execNative, spawnNative } from "./process-internal/native.js";
 const execFileAsync = promisify(execFile);
+// A scriptc executable reports "scriptc" as argv[0]; Node reports its own path.
+const RUNNING_AS_SCRIPTC_BINARY = process.argv[0] === "scriptc";
 export interface ExecCommandOptions {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
@@ -64,6 +67,9 @@ export function spawnProcess(
   const resolvedCommand = shouldQuoteForShell ? quoteWindowsCommand(command) : command;
   const resolvedArgs = shouldQuoteForShell ? args.map(quoteWindowsArgument) : args;
 
+  if (RUNNING_AS_SCRIPTC_BINARY) {
+    return spawnNative(resolvedCommand, resolvedArgs, spawnOptions, shell);
+  }
   return spawn(resolvedCommand, resolvedArgs, {
     ...spawnOptions,
     env: options?.env,
@@ -84,6 +90,9 @@ export async function execCommand(
   const resolvedCommand = shouldQuoteForShell ? quoteWindowsCommand(command) : command;
   const resolvedArgs = shouldQuoteForShell ? args.map(quoteWindowsArgument) : args;
 
+  if (RUNNING_AS_SCRIPTC_BINARY) {
+    return execNative(resolvedCommand, resolvedArgs, options ?? {}, shell);
+  }
   return execFileAsync(resolvedCommand, resolvedArgs, {
     cwd: options?.cwd,
     env: options?.env,

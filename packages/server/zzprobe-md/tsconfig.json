@@ -1,0 +1,1 @@
+{"extends":"../native/tsconfig.json","compilerOptions":{"rootDir":"../../../../.."},"files":["md.ts"],"include":[]}

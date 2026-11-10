@@ -39,6 +39,7 @@ import {
   type SteerActiveTurnOptions,
   type SteerResult,
   type ToolCallDetail,
+  type ToolCallTimelineItem,
 } from "../../agent-sdk-types.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
 import { importSessionFromPersistence } from "../../provider-session-import.js";
@@ -1973,7 +1974,9 @@ export class OmpAgentSession implements AgentSession {
     if (event.message.role !== "assistant") {
       return;
     }
-    if (event.assistantMessageEvent.type === "text_delta") {
+    // scriptc narrows a local on its discriminant, not a re-read of event.assistantMessageEvent.
+    const assistantEvent = event.assistantMessageEvent;
+    if (assistantEvent.type === "text_delta") {
       // Omp-compatible runtimes may emit updates without a preceding message_start.
       this.activeAssistantMessageId ??= event.message.responseId || randomUUID();
       this.emit({
@@ -1982,20 +1985,20 @@ export class OmpAgentSession implements AgentSession {
         turnId,
         item: {
           type: "assistant_message",
-          text: event.assistantMessageEvent.delta ?? "",
+          text: assistantEvent.delta ?? "",
           messageId: this.activeAssistantMessageId,
         },
       });
       return;
     }
-    if (event.assistantMessageEvent.type === "thinking_delta") {
+    if (assistantEvent.type === "thinking_delta") {
       this.emit({
         type: "timeline",
         provider: this.provider,
         turnId,
         item: {
           type: "reasoning",
-          text: event.assistantMessageEvent.delta ?? "",
+          text: assistantEvent.delta ?? "",
         },
       });
     }
@@ -2013,46 +2016,48 @@ export class OmpAgentSession implements AgentSession {
     event: Extract<OmpAgentSessionEvent, { type: "message_end" }>,
     turnId: string | undefined,
   ): void {
-    if (event.message.role === "assistant") {
+    // scriptc narrows a local on its discriminant, not a re-read of event.message.
+    const message = event.message;
+    if (message.role === "assistant") {
       this.activeAssistantMessageId = null;
-      this.questionUi.observeMessage(event.message);
+      this.questionUi.observeMessage(message);
       if (turnId) {
-        this.activeTurnTerminalAssistantMessage = event.message;
+        this.activeTurnTerminalAssistantMessage = message;
       }
       return;
     }
-    if (event.message.role === "custom") {
-      if (shouldDisplayOmpCustomMessage(event.message)) {
-        const text = getUserMessageText(event.message.content);
+    if (message.role === "custom") {
+      if (shouldDisplayOmpCustomMessage(message)) {
+        const text = getUserMessageText(message.content);
         if (text) {
-          const skillPrompt = ompSkillPromptUserText(event.message);
+          const skillPrompt = ompSkillPromptUserText(message);
           if (skillPrompt) {
             this.emitSkillPromptEcho(turnId);
             return;
           }
           const item =
-            mapOmpAdvisorMessageToToolCall(event.message, text) ??
+            mapOmpAdvisorMessageToToolCall(message, text) ??
             mapOmpSystemNoticeToNotification(text);
           this.emit({
             type: "timeline",
             provider: this.provider,
             turnId,
             item:
-              item ?? mapCustomMessageToToolCall(event.message, text, `omp-custom-${randomUUID()}`),
+              item ?? mapCustomMessageToToolCall(message, text, `omp-custom-${randomUUID()}`),
           });
         }
       }
       return;
     }
 
-    if (event.message.role !== "user") {
+    if (message.role !== "user") {
       return;
     }
-    const text = getUserMessageText(event.message.content);
+    const text = getUserMessageText(message.content);
     if (!text) {
       return;
     }
-    const nativeMessage = event.message as OmpAgentMessage & { id?: unknown; entryId?: unknown };
+    const nativeMessage = message as OmpAgentMessage & { id?: unknown; entryId?: unknown };
     const messageId = readNativeMessageId(nativeMessage);
     const emitUserMessage = (resolvedMessageId?: string): void => {
       if (resolvedMessageId) {
@@ -2132,7 +2137,8 @@ export class OmpAgentSession implements AgentSession {
         : resolveToolCallName(toolCall, result),
       detail,
     };
-    const item =
+    // scriptc cannot map the inferred union of the two literals into the timeline item union.
+    const item: ToolCallTimelineItem =
       status === "failed" ? { ...baseItem, status, error } : { ...baseItem, status, error: null };
     this.emit({
       type: "timeline",

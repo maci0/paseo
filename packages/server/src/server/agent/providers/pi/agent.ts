@@ -40,6 +40,7 @@ import {
   type ListImportableSessionsOptions,
   type ProviderCatalog,
   type ProviderRefreshContext,
+  type ToolCallTimelineItem,
 } from "../../agent-sdk-types.js";
 import { importSessionFromPersistence } from "../../provider-session-import.js";
 import { runProviderRefreshActivity } from "../../provider-refresh-deadline.js";
@@ -999,19 +1000,25 @@ function mapExtensionUiRequestToPermission(
 function isExtensionUiRequestEvent(
   event: PiRuntimeEvent,
 ): event is Extract<PiRuntimeEvent, { type: "extension_ui_request" }> {
-  return event.type === "extension_ui_request" && typeof event.id === "string";
+  // scriptc reads fields across the catch-all event arm only through a record view.
+  const fields: Record<string, unknown> = event;
+  return event.type === "extension_ui_request" && typeof fields.id === "string";
 }
 
 function isProcessExitEvent(
   event: PiRuntimeEvent,
 ): event is Extract<PiRuntimeEvent, { type: "process_exit" }> {
-  return event.type === "process_exit" && typeof event.error === "string";
+  const fields: Record<string, unknown> = event;
+  return event.type === "process_exit" && typeof fields.error === "string";
 }
 
 function isPiAgentSessionEvent(event: PiRuntimeEvent): event is PiAgentSessionEvent {
+  const fields: Record<string, unknown> = event;
   switch (event.type) {
-    case "thinking_level_changed":
-      return typeof event.level === "string" && normalizePiThinkingOption(event.level) !== null;
+    case "thinking_level_changed": {
+      const level = fields.level;
+      return typeof level === "string" && normalizePiThinkingOption(level) !== null;
+    }
     case "agent_start":
     case "turn_start":
     case "message_start":
@@ -1629,7 +1636,13 @@ export class PiRpcAgentSession implements AgentSession {
     try {
       await this.runtimeSession.close();
     } finally {
-      await Promise.all([this.pendingOutput, ...this.pendingExtensionHydrations]);
+      // scriptc has no tuple of a nullable promise and a spread; Promise.resolve() settles in
+      // the same tick Promise.all gives null.
+      const pending: Promise<void>[] = [
+        this.pendingOutput ?? Promise.resolve(),
+        ...this.pendingExtensionHydrations,
+      ];
+      await Promise.all(pending);
       this.rejectAllExtensionResults(new Error("Pi session closed"));
       this.cleanup?.();
     }
@@ -2140,7 +2153,9 @@ export class PiRpcAgentSession implements AgentSession {
       return;
     }
     if (event.type === "command_output") {
-      this.handleCommandOutput(event.text);
+      // scriptc reads fields across the catch-all event arm only through a record view.
+      const fields: Record<string, unknown> = event;
+      this.handleCommandOutput(fields.text);
       return;
     }
     if (event.type === "prompt_result") {
@@ -2512,7 +2527,8 @@ export class PiRpcAgentSession implements AgentSession {
       name: mapping?.name ?? toolCall.toolName,
       detail,
     };
-    const item =
+    // scriptc cannot map the inferred union of the two literals into the timeline item union.
+    const item: ToolCallTimelineItem =
       status === "failed" ? { ...baseItem, status, error } : { ...baseItem, status, error: null };
     this.emit({
       type: "timeline",

@@ -1,4 +1,6 @@
 const PASEO_NODE_ENV = "PASEO_NODE_ENV";
+// A scriptc executable reports "scriptc" as argv[0]; Node reports its own path.
+const RUNNING_AS_SCRIPTC_BINARY = process.argv[0] === "scriptc";
 const ELECTRON_RUN_AS_NODE = "ELECTRON_RUN_AS_NODE";
 
 const RUNTIME_CONTROL_ENV_KEYS = [
@@ -63,14 +65,20 @@ export function buildSelfNodeCommand(
   env: ExternalProcessEnv;
 } {
   const env = buildExternalProcessEnv(process.env, []);
-  Object.assign(env, { [ELECTRON_RUN_AS_NODE]: "1" }, envOverlay);
-  for (const [key, value] of Object.entries(env)) {
+  // Key by key: scriptc lowers no Object.assign onto an existing object. An undefined overlay
+  // value removes the key.
+  env[ELECTRON_RUN_AS_NODE] = "1";
+  for (const [key, value] of Object.entries(envOverlay ?? {})) {
     if (value === undefined) {
       delete env[key];
+    } else {
+      env[key] = value;
     }
   }
   return {
-    command: process.execPath,
+    // A scriptc binary's execPath is the binary itself, which runs no scripts: use the Node on
+    // the child's PATH.
+    command: RUNNING_AS_SCRIPTC_BINARY ? "node" : process.execPath,
     args,
     env,
   };

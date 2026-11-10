@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
 
 interface AtomicFileRuntime {
   platform: NodeJS.Platform;
@@ -14,12 +18,12 @@ const runtime: AtomicFileRuntime = {
   platform: process.platform,
   rename: fs.rename,
   now: () => performance.now(),
-  sleep,
+  sleep: (milliseconds) => sleep(milliseconds),
 };
 
 export async function writeFileAtomic(
   filePath: string,
-  data: string | NodeJS.ArrayBufferView,
+  data: string | Uint8Array,
   operations: AtomicFileRuntime = runtime,
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -28,7 +32,7 @@ export async function writeFileAtomic(
     `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`,
   );
   try {
-    await fs.writeFile(tempPath, data, "utf8");
+    await fs.writeFile(tempPath, data, { encoding: "utf8" });
     await replaceFile(tempPath, filePath, operations);
   } catch (error) {
     await fs.rm(tempPath, { force: true });

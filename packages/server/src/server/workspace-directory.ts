@@ -52,7 +52,11 @@ type FetchWorkspacesRequestMessage = Extract<
   { type: "fetch_workspaces_request" }
 >;
 type FetchWorkspacesRequestFilter = NonNullable<FetchWorkspacesRequestMessage["filter"]>;
-type FetchWorkspacesRequestSort = NonNullable<FetchWorkspacesRequestMessage["sort"]>[number];
+// Sort keys come from the local tuple: scriptc resolves the protocol-derived key type to any.
+type FetchWorkspacesSortKey = (typeof FETCH_WORKSPACES_SORT_KEYS)[number];
+// A named interface as type argument: scriptc cannot instantiate a generic class with the
+// protocol's z.infer type alias directly.
+interface PagedWorkspace extends WorkspaceDescriptorPayload {}
 type FetchWorkspacesResponsePayload = Extract<
   SessionOutboundMessage,
   { type: "fetch_workspaces_response" }
@@ -90,7 +94,7 @@ export interface WorkspaceDirectoryDeps {
   }): Promise<WorkspaceDescriptorPayload>;
 }
 
-export function summarizeFetchWorkspacesEntries(entries: Iterable<FetchWorkspacesResponseEntry>): {
+export function summarizeFetchWorkspacesEntries(entries: readonly FetchWorkspacesResponseEntry[]): {
   count: number;
   projectIds: string[];
   statusCounts: Record<string, number>;
@@ -104,7 +108,7 @@ export function summarizeFetchWorkspacesEntries(entries: Iterable<FetchWorkspace
     activityAt: string | null;
   }>;
 } {
-  const workspaces = Array.from(entries, (entry) => ({
+  const workspaces = entries.map((entry) => ({
     id: entry.id,
     projectId: entry.projectId,
     projectDisplayName: entry.projectDisplayName,
@@ -175,10 +179,7 @@ export class WorkspaceDirectory {
    */
   private readonly bucketHistoryByWorkspaceId = new Map<string, WorkspaceBucketHistoryEntry>();
 
-  private readonly pager = new SortablePager<
-    WorkspaceDescriptorPayload,
-    FetchWorkspacesRequestSort["key"]
-  >({
+  private readonly pager = new SortablePager<PagedWorkspace, FetchWorkspacesSortKey>({
     validKeys: FETCH_WORKSPACES_SORT_KEYS,
     defaultSort: [{ key: "activity_at", direction: "desc" }],
     label: "fetch_workspaces",
@@ -201,13 +202,13 @@ export class WorkspaceDirectory {
 
   constructor(private readonly deps: WorkspaceDirectoryDeps) {}
 
-  markArchiving(workspaceIds: Iterable<string>, archivingAt: string): void {
+  markArchiving(workspaceIds: readonly string[], archivingAt: string): void {
     for (const workspaceId of workspaceIds) {
       this.archivingByWorkspaceId.set(workspaceId, archivingAt);
     }
   }
 
-  clearArchiving(workspaceIds: Iterable<string>): void {
+  clearArchiving(workspaceIds: readonly string[]): void {
     for (const workspaceId of workspaceIds) {
       this.archivingByWorkspaceId.delete(workspaceId);
     }
@@ -215,7 +216,7 @@ export class WorkspaceDirectory {
 
   async buildDescriptorMap(options: {
     includeGitData: boolean;
-    workspaceIds?: Iterable<string>;
+    workspaceIds?: ReadonlySet<string>;
   }): Promise<Map<string, WorkspaceDescriptorPayload>> {
     const [
       agents,

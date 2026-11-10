@@ -56,6 +56,7 @@ import type {
 } from "./forge-service.js";
 import {
   isGitHubPullRequestStatusFacts,
+  type GitHubForgeSpecificStatusFacts,
   type GitHubPullRequestStatusFacts,
 } from "./github-facts.js";
 
@@ -213,11 +214,6 @@ const PullRequestStatusContextNodeSchema = z.object({
   targetUrl: z.string().nullable().optional(),
   createdAt: z.string().nullable().optional(),
 });
-
-const PullRequestStatusCheckRollupNodeSchema = z.discriminatedUnion("__typename", [
-  PullRequestCheckRunNodeSchema,
-  PullRequestStatusContextNodeSchema,
-]);
 
 const PullRequestStatusCheckRollupArraySchema = z.array(z.unknown());
 const LegacyPullRequestStatusCheckRollupSchema = z.object({
@@ -1030,7 +1026,8 @@ class GitHubGraphqlPollPausedError extends Error {
 
 export class GitHubEnterpriseHostProbeError extends Error {
   readonly host: string;
-  override readonly cause: Error;
+  // Typed unknown, not Error: scriptc only lets a subclass redeclare Error.cause as unknown.
+  override readonly cause?: unknown;
 
   constructor(params: { host: string; cause: Error }) {
     super(`Unable to verify GitHub Enterprise host ${params.host}`);
@@ -1120,6 +1117,91 @@ interface ResolvedPullRequestCandidate {
   headRepositoryOwner?: string;
 }
 
+// The service's response cache, shared with the top-level cachedGitHubRead.
+interface GitHubReadCache {
+  cache: Map<string, CacheEntry>;
+  inFlight: Map<string, InFlightCacheEntry>;
+  deps: GitHubServiceDependencies;
+  ttlMs: number;
+}
+
+type GitHubJsonRun = (args: string[], options: GitHubCommandRunnerOptions) => Promise<string>;
+
+// The generic helpers live at top level: scriptc lowers only top-level generic functions.
+async function cachedGitHubRead<T>(
+  store: GitHubReadCache,
+  params: {
+    cwd: string;
+    method: string;
+    args: unknown;
+    // One record, not the ForgeReadOptions union: scriptc cannot convert the callers'
+    // intersected option unions into it.
+    readOptions?: { force?: boolean; reason?: string };
+    load: () => Promise<T>;
+  },
+): Promise<T> {
+  if (params.readOptions?.force && !params.readOptions.reason) {
+    throw new Error("ForgeService forced read requires a reason");
+  }
+
+  const key = buildCacheKey({
+    cwd: params.cwd,
+    method: params.method,
+    args: params.args,
+  });
+  const cachedEntry = store.cache.get(key);
+  const now = store.deps.now();
+  if (!params.readOptions?.force && cachedEntry && cachedEntry.expiresAt > now) {
+    return cachedEntry.value as T;
+  }
+
+  const existing = store.inFlight.get(key);
+  if (existing && (!params.readOptions?.force || existing.force)) {
+    return existing.promise as Promise<T>;
+  }
+
+  // Declared before assignment: scriptc cannot lower a const read inside its own initializer.
+  let request: Promise<T> | null = null;
+  request = params
+    .load()
+    .then((value) => {
+      if (store.inFlight.get(key)?.promise === request) {
+        store.cache.set(key, {
+          value,
+          cwd: params.cwd,
+          expiresAt: store.deps.now() + store.ttlMs,
+        });
+      }
+      return value;
+    })
+    .finally(() => {
+      if (store.inFlight.get(key)?.promise === request) {
+        store.inFlight.delete(key);
+      }
+    });
+  store.inFlight.set(key, {
+    cwd: params.cwd,
+    promise: request,
+    force: params.readOptions?.force === true,
+  });
+  return request;
+}
+
+async function runGhJson<T>(
+  run: GitHubJsonRun,
+  args: string[],
+  runOptions: GitHubCommandRunnerOptions,
+  schema: z.ZodType<T>,
+  emptyFallback: string,
+): Promise<T> {
+  const stdout = await run(args, runOptions);
+  return parseGitHubJsonOutput(stdout, schema, {
+    args,
+    cwd: runOptions.cwd,
+    emptyFallback,
+  });
+}
+
 export function createGitHubService(options: CreateGitHubServiceOptions = {}): GitHubService {
   const ttlMs = options.ttlMs ?? DEFAULT_GITHUB_CACHE_TTL_MS;
   const deps: GitHubServiceDependencies = {
@@ -1169,65 +1251,16 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
   const rateLimitResetLoads = new Map<string, Promise<number | null>>();
   let githubPollTimer: NodeJS.Timeout | null = null;
   let api!: GitHubService;
-
-  async function cached<T>(params: {
-    cwd: string;
-    method: string;
-    args: unknown;
-    readOptions?: ForgeReadOptions;
-    load: () => Promise<T>;
-  }): Promise<T> {
-    if (params.readOptions?.force && !params.readOptions.reason) {
-      throw new Error("ForgeService forced read requires a reason");
-    }
-
-    const key = buildCacheKey({
-      cwd: params.cwd,
-      method: params.method,
-      args: params.args,
-    });
-    const cachedEntry = cache.get(key);
-    const now = deps.now();
-    if (!params.readOptions?.force && cachedEntry && cachedEntry.expiresAt > now) {
-      return cachedEntry.value as T;
-    }
-
-    const existing = inFlight.get(key);
-    if (existing && (!params.readOptions?.force || existing.force)) {
-      return existing.promise as Promise<T>;
-    }
-
-    const request = params
-      .load()
-      .then((value) => {
-        if (inFlight.get(key)?.promise === request) {
-          cache.set(key, {
-            value,
-            cwd: params.cwd,
-            expiresAt: deps.now() + ttlMs,
-          });
-        }
-        return value;
-      })
-      .finally(() => {
-        if (inFlight.get(key)?.promise === request) {
-          inFlight.delete(key);
-        }
-      });
-    inFlight.set(key, {
-      cwd: params.cwd,
-      promise: request,
-      force: params.readOptions?.force === true,
-    });
-    return request;
-  }
+  const readCache: GitHubReadCache = { cache, inFlight, deps, ttlMs };
 
   function resolveRepoHostCached(cwd: string): Promise<string | null> {
     const cachedHost = repoHostByCwd.get(cwd);
     if (cachedHost && (cachedHost.expiresAt === null || deps.now() < cachedHost.expiresAt)) {
       return cachedHost.promise;
     }
-    const pending = deps
+    // Declared before assignment: scriptc cannot lower a const read inside its own initializer.
+    let pending: Promise<string | null> | null = null;
+    pending = deps
       .resolveRepoHost(cwd)
       .then((host) => {
         const current = repoHostByCwd.get(cwd);
@@ -1273,11 +1306,13 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     // failures (lock contention, timeout), and a permanent null would silently
     // pin this cwd to the legacy per-target poll path. The `resolved` marker
     // survives the refresh so batching keeps the last known slug meanwhile.
-    const entry: {
+    // Declared before assignment: scriptc cannot lower a const read inside its own initializer.
+    let entry!: {
       promise: Promise<string | null>;
       expiresAt: number | null;
       resolved?: { value: string | null };
-    } = {
+    };
+    entry = {
       promise: deps
         .resolveRepoSlug(cwd)
         .then((slug) => {
@@ -1336,20 +1371,6 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         cwd: runOptions.cwd,
       });
     }
-  }
-
-  async function runGhJson<T>(
-    args: string[],
-    runOptions: GitHubCommandRunnerOptions,
-    schema: z.ZodType<T>,
-    emptyFallback: string,
-  ): Promise<T> {
-    const stdout = await run(args, runOptions);
-    return parseGitHubJsonOutput(stdout, schema, {
-      args,
-      cwd: runOptions.cwd,
-      emptyFallback,
-    });
   }
 
   function getPollTargetKey(target: {
@@ -1600,7 +1621,10 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     if (existing) {
       return existing;
     }
-    const pending = runGhJson(
+    // Declared before assignment: scriptc cannot lower a const read inside its own initializer.
+    let pending: Promise<number | null> | null = null;
+    pending = runGhJson(
+      run,
       ["api", "rate_limit"],
       { cwd: entry.target.cwd },
       GitHubRateLimitResponseSchema,
@@ -1949,7 +1973,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         toBatchCurrentPullRequestItem(node, input.rollup ?? undefined),
         entry.target.headRef,
       );
-      status = built ? { ...built, forgeSpecific: { forge: "github", ...facts } } : null;
+      status = built ? { ...built, forgeSpecific: toGitHubForgeSpecificStatusFacts(facts) } : null;
     }
     const cacheKey = buildCacheKey({
       cwd: entry.target.cwd,
@@ -2025,13 +2049,14 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     authProbeCanThrow: true,
 
     listPullRequests(input) {
-      return cached({
+      return cachedGitHubRead(readCache, {
         cwd: input.cwd,
         method: "listPullRequests",
         args: { query: input.query ?? "", limit: input.limit ?? 20 },
         readOptions: input,
         load: async () => {
           const items = await runGhJson(
+            run,
             [
               "pr",
               "list",
@@ -2052,13 +2077,14 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     listIssues(input) {
-      return cached({
+      return cachedGitHubRead(readCache, {
         cwd: input.cwd,
         method: "listIssues",
         args: { query: input.query ?? "", limit: input.limit ?? 20 },
         readOptions: input,
         load: async () => {
           const items = await runGhJson(
+            run,
             [
               "issue",
               "list",
@@ -2079,13 +2105,14 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     getPullRequest(input) {
-      return cached({
+      return cachedGitHubRead(readCache, {
         cwd: input.cwd,
         method: "getPullRequest",
         args: { number: input.number },
         readOptions: input,
         load: async () => {
           const item = await runGhJson(
+            run,
             [
               "pr",
               "view",
@@ -2118,7 +2145,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     supportsCrossRepoCheckoutWithoutRefs: true,
 
     getPullRequestCheckoutTarget(input) {
-      return cached({
+      return cachedGitHubRead(readCache, {
         cwd: input.cwd,
         method: "getPullRequestCheckoutTarget",
         args: { number: input.number },
@@ -2132,6 +2159,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
           }
 
           const parsed = await runGhJson(
+            run,
             [
               "api",
               "graphql",
@@ -2154,7 +2182,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     getCurrentPullRequestStatus(input) {
-      return cached({
+      return cachedGitHubRead(readCache, {
         cwd: input.cwd,
         method: "getCurrentPullRequestStatus",
         args: {
@@ -2187,7 +2215,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     getPullRequestTimeline(input) {
-      return cached({
+      return cachedGitHubRead(readCache, {
         cwd: input.cwd,
         method: "getPullRequestTimeline",
         args: { prNumber: input.prNumber },
@@ -2195,6 +2223,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         load: async () => {
           try {
             const parsed = await runGhJson(
+              run,
               [
                 "api",
                 "graphql",
@@ -2238,7 +2267,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       if (checkRunId === undefined) {
         throw new Error("GitHub getCheckDetails requires checkRunId");
       }
-      return cached({
+      return cachedGitHubRead(readCache, {
         cwd: input.cwd,
         method: "getCheckDetails",
         args: {
@@ -2252,6 +2281,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
           const repoPath = `repos/${repoOwner}/${repoName}`;
           const checkRun = toGitHubCheckRunDetails(
             await runGhJson(
+              run,
               ["api", `${repoPath}/check-runs/${checkRunId}`],
               { cwd: input.cwd },
               GitHubCheckRunDetailsSchema,
@@ -2260,6 +2290,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
           );
           const annotations = toGitHubCheckAnnotations(
             await runGhJson(
+              run,
               [
                 "api",
                 `${repoPath}/check-runs/${checkRunId}/annotations`,
@@ -2280,6 +2311,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
           if (typeof workflowRunId === "number") {
             const jobs = toGitHubActionsJobs(
               await runGhJson(
+                run,
                 [
                   "api",
                   `${repoPath}/actions/runs/${workflowRunId}/jobs`,
@@ -2501,6 +2533,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         args.push("-f", `body=${input.body}`);
       }
       const parsed = await runGhJson(
+        run,
         args,
         { cwd: input.cwd },
         z.object({
@@ -2540,7 +2573,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     isAuthenticated(input) {
-      return cached({
+      return cachedGitHubRead(readCache, {
         cwd: input.cwd,
         method: "isAuthenticated",
         args: {},
@@ -2665,7 +2698,39 @@ function getGithubStatusFacts(
   status: PullRequestCommandStatus | null | undefined,
 ): GitHubPullRequestStatusFacts | null {
   const forgeSpecific = status?.forgeSpecific;
-  return isGitHubPullRequestStatusFacts(forgeSpecific) ? forgeSpecific : null;
+  if (!isGitHubPullRequestStatusFacts(forgeSpecific)) {
+    return null;
+  }
+  // Copied field by field: scriptc cannot convert the index-signature envelope to the record.
+  return {
+    mergeStateStatus: forgeSpecific.mergeStateStatus,
+    autoMergeRequest: forgeSpecific.autoMergeRequest,
+    viewerCanEnableAutoMerge: forgeSpecific.viewerCanEnableAutoMerge,
+    viewerCanDisableAutoMerge: forgeSpecific.viewerCanDisableAutoMerge,
+    viewerCanMergeAsAdmin: forgeSpecific.viewerCanMergeAsAdmin,
+    viewerCanUpdateBranch: forgeSpecific.viewerCanUpdateBranch,
+    repository: forgeSpecific.repository,
+    isMergeQueueEnabled: forgeSpecific.isMergeQueueEnabled,
+    isInMergeQueue: forgeSpecific.isInMergeQueue,
+  };
+}
+
+// Field by field, not a spread: scriptc cannot spread a record into an index-signature shape.
+function toGitHubForgeSpecificStatusFacts(
+  facts: GitHubPullRequestStatusFacts,
+): GitHubForgeSpecificStatusFacts {
+  return {
+    forge: "github",
+    mergeStateStatus: facts.mergeStateStatus,
+    autoMergeRequest: facts.autoMergeRequest,
+    viewerCanEnableAutoMerge: facts.viewerCanEnableAutoMerge,
+    viewerCanDisableAutoMerge: facts.viewerCanDisableAutoMerge,
+    viewerCanMergeAsAdmin: facts.viewerCanMergeAsAdmin,
+    viewerCanUpdateBranch: facts.viewerCanUpdateBranch,
+    repository: facts.repository,
+    isMergeQueueEnabled: facts.isMergeQueueEnabled,
+    isInMergeQueue: facts.isInMergeQueue,
+  };
 }
 
 function assertDirectPullRequestMergeReady(input: MergePullRequestOptions): void {
@@ -3099,7 +3164,7 @@ async function addCurrentPullRequestGithubFacts(options: {
   }
   return {
     ...status,
-    forgeSpecific: { forge: "github", ...facts },
+    forgeSpecific: toGitHubForgeSpecificStatusFacts(facts),
   };
 }
 
@@ -4044,13 +4109,19 @@ export function parseStatusCheckRollup(value: unknown, nowMs = Date.now()): Pull
 
   const dedupedChecks = new Map<string, PullRequestCheck & { recency: number }>();
   for (const entry of directContexts.data) {
-    const parsed = PullRequestStatusCheckRollupNodeSchema.safeParse(entry);
-    if (!parsed.success) {
-      continue;
-    }
-    const check = buildPullRequestCheck(parsed.data, nowMs);
-    if (!check) {
-      continue;
+    // Each node schema pins its __typename literal, so trying both matches the
+    // discriminated union over them. scriptc rejects the __typename read on that
+    // union's value in this module, so each arm is parsed and built separately.
+    let check: PullRequestCheck & { recency: number };
+    const checkRun = PullRequestCheckRunNodeSchema.safeParse(entry);
+    if (checkRun.success) {
+      check = buildCheckRunCheck(checkRun.data, nowMs);
+    } else {
+      const statusContext = PullRequestStatusContextNodeSchema.safeParse(entry);
+      if (!statusContext.success) {
+        continue;
+      }
+      check = buildStatusContextCheck(statusContext.data);
     }
     const existing = dedupedChecks.get(check.name);
     if (!existing || check.recency > existing.recency) {
@@ -4061,35 +4132,35 @@ export function parseStatusCheckRollup(value: unknown, nowMs = Date.now()): Pull
   return Array.from(dedupedChecks.values(), ({ recency: _recency, ...check }) => check);
 }
 
-function buildPullRequestCheck(
-  context: z.infer<typeof PullRequestStatusCheckRollupNodeSchema>,
+function buildCheckRunCheck(
+  context: PullRequestCheckRunNode,
   nowMs: number,
-): (PullRequestCheck & { recency: number }) | null {
-  if (context.__typename === "CheckRun") {
-    return {
-      name: context.name,
-      status: mapCheckRunStatus(context.status, context.conclusion),
-      url: typeof context.detailsUrl === "string" ? context.detailsUrl : null,
-      ...(typeof context.workflowName === "string" && context.workflowName.trim().length > 0
-        ? { workflow: context.workflowName }
-        : {}),
-      ...(typeof context.databaseId === "number" ? { checkRunId: context.databaseId } : {}),
-      ...(typeof context.checkSuite?.workflowRun?.databaseId === "number"
-        ? { workflowRunId: context.checkSuite.workflowRun.databaseId }
-        : {}),
-      ...formatCheckRunDuration(context, nowMs),
-      recency: getCheckRunRecency(context),
-    };
-  }
-  if (context.__typename === "StatusContext") {
-    return {
-      name: context.context,
-      status: mapStatusContextState(context.state),
-      url: typeof context.targetUrl === "string" ? context.targetUrl : null,
-      recency: getStatusContextRecency(context),
-    };
-  }
-  return null;
+): PullRequestCheck & { recency: number } {
+  return {
+    name: context.name,
+    status: mapCheckRunStatus(context.status, context.conclusion),
+    url: typeof context.detailsUrl === "string" ? context.detailsUrl : null,
+    ...(typeof context.workflowName === "string" && context.workflowName.trim().length > 0
+      ? { workflow: context.workflowName }
+      : {}),
+    ...(typeof context.databaseId === "number" ? { checkRunId: context.databaseId } : {}),
+    ...(typeof context.checkSuite?.workflowRun?.databaseId === "number"
+      ? { workflowRunId: context.checkSuite.workflowRun.databaseId }
+      : {}),
+    ...formatCheckRunDuration(context, nowMs),
+    recency: getCheckRunRecency(context),
+  };
+}
+
+function buildStatusContextCheck(
+  context: PullRequestStatusContextNode,
+): PullRequestCheck & { recency: number } {
+  return {
+    name: context.context,
+    status: mapStatusContextState(context.state),
+    url: typeof context.targetUrl === "string" ? context.targetUrl : null,
+    recency: getStatusContextRecency(context),
+  };
 }
 
 function mapCheckRunStatus(status: unknown, conclusion: unknown): PullRequestCheckStatus {

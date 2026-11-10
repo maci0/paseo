@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import type { SkillTargets } from "./operations.js";
 
 export function resolveBundledSkillsDir(moduleUrl: string | URL = import.meta.url): string {
+  // In a scriptc binary (process.argv[0] "scriptc") import.meta.url is the source path on the
+  // build machine, so the files ship beside the executable as skills/.
+  if (process.argv[0] === "scriptc") return path.join(path.dirname(process.execPath), "skills");
   const moduleDir = path.dirname(fileURLToPath(moduleUrl));
   const candidates = [
     path.resolve(moduleDir, "..", "..", "..", "skills"),

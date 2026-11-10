@@ -1,4 +1,4 @@
-import * as QRCode from "qrcode";
+import QRCode from "qrcode";
 import type { QRCodeToStringOptionsOther } from "qrcode";
 
 const BLACK_ON_WHITE = "\u001b[47m\u001b[30m";

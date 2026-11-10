@@ -1,3 +1,4 @@
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ProviderLaunch } from "@getpaseo/plugin/server/provider";
 import { spawnProcess, terminateProcess } from "@getpaseo/plugin/server";
 import { randomBytes } from "node:crypto";
@@ -27,7 +28,8 @@ export interface Notification {
 }
 
 export class MspConnection {
-  private readonly child;
+  // Declared: scriptc cannot lower the stream calls on the type inferred from spawnProcess().
+  private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string | number, PendingRequest>();
   private readonly listeners = new Set<(notification: Notification) => void>();
   private readonly exitListeners = new Set<(error: MuseError) => void>();

@@ -151,15 +151,27 @@ export function normalizeCheckoutPrStatusPayload(
   } else if (status.repoOwner && status.repoName) {
     payload.projectPath = `${status.repoOwner}/${status.repoName}`;
   }
-  if (status.forgeSpecific) {
-    payload.forgeSpecific = status.forgeSpecific;
+  const forgeSpecific = status.forgeSpecific;
+  if (forgeSpecific) {
+    payload.forgeSpecific = forgeSpecific;
     // COMPAT(forgeSpecific): forgeSpecific shipped in v0.2.0-beta.1. Keep
     // mirroring GitHub facts onto `github` for clients that predate it. Stop
     // emitting the mirror after 2027-01-17 once the supported client floor
     // is >= v0.2.0.
-    if (isGitHubPullRequestStatusFacts(status.forgeSpecific)) {
-      const { forge: _forge, ...githubFacts } = status.forgeSpecific;
-      payload.github = githubFacts;
+    if (isGitHubPullRequestStatusFacts(forgeSpecific)) {
+      // Field by field: scriptc has no rest binding over the index-signature envelope. GitHub
+      // facts are built with exactly these fields (toGitHubForgeSpecificStatusFacts).
+      payload.github = {
+        mergeStateStatus: forgeSpecific.mergeStateStatus,
+        autoMergeRequest: forgeSpecific.autoMergeRequest,
+        viewerCanEnableAutoMerge: forgeSpecific.viewerCanEnableAutoMerge,
+        viewerCanDisableAutoMerge: forgeSpecific.viewerCanDisableAutoMerge,
+        viewerCanMergeAsAdmin: forgeSpecific.viewerCanMergeAsAdmin,
+        viewerCanUpdateBranch: forgeSpecific.viewerCanUpdateBranch,
+        repository: forgeSpecific.repository,
+        isMergeQueueEnabled: forgeSpecific.isMergeQueueEnabled,
+        isInMergeQueue: forgeSpecific.isInMergeQueue,
+      };
     }
   }
   return payload as CheckoutPrStatusPayloadStatus;

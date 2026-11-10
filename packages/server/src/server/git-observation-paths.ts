@@ -1,12 +1,14 @@
 import { realpath } from "node:fs";
-import { readlink } from "node:fs/promises";
+import { readlink, realpath as realpathPromise } from "node:fs/promises";
 import { promisify } from "node:util";
 import pLimit from "p-limit";
 import { dirname, resolve as resolvePath, sep } from "node:path";
 import { looksLikeDefiniteWindowsPath, normalizePathPreservingCase } from "../utils/path.js";
 
-const nativeRealpath = promisify(realpath.native);
-const jsRealpath = promisify(realpath);
+// fs/promises realpath is the resolver behind realpath.native, which scriptc cannot promisify.
+const nativeRealpath = (path: string): Promise<string> => realpathPromise(path);
+const promisifiedRealpath = promisify(realpath);
+const jsRealpath = (path: string): Promise<string> => promisifiedRealpath(path);
 const identityIo = pLimit(2);
 
 /** A subscription owns its lexical namespace, including the OS's real-root alias. */

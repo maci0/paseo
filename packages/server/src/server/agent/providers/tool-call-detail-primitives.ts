@@ -84,8 +84,10 @@ export const ToolShellInputSchema = z
       .passthrough(),
   ])
   .transform((value) => {
+    // scriptc cannot read a field across the two passthrough arms; read it as a record.
+    const record: Record<string, unknown> = value;
     const parsedCommand = CommandValueSchema.safeParse(
-      "command" in value ? value.command : value.cmd,
+      "command" in record ? record.command : record.cmd,
     );
     let command: string | undefined;
     if (parsedCommand.success) {

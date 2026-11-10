@@ -6,7 +6,10 @@ interface TerminalSizeRequest {
   intent?: "claim" | "update";
 }
 
-const terminalSizeOwners = new WeakMap<TerminalSession, WeakRef<object>>();
+// Each claim is a fresh object. The terminal holds its current claim and each owner weakly knows
+// the claims it made, so a terminal never keeps its owner alive. scriptc has no `WeakRef`.
+const terminalSizeClaims = new WeakMap<TerminalSession, object>();
+const ownerSizeClaims = new WeakMap<object, WeakSet<object>>();
 
 export function applyTerminalSize(
   terminal: TerminalSession,
@@ -14,12 +17,19 @@ export function applyTerminalSize(
   request: TerminalSizeRequest,
 ): boolean {
   const intent = resolveTerminalSizeIntent(request.intent);
-  if (intent === "update" && terminalSizeOwners.get(terminal)?.deref() !== owner) {
+  if (intent === "update" && !ownsTerminalSize(terminal, owner)) {
     return false;
   }
 
   if (intent === "claim") {
-    terminalSizeOwners.set(terminal, new WeakRef(owner));
+    const claim = {};
+    terminalSizeClaims.set(terminal, claim);
+    let claims = ownerSizeClaims.get(owner);
+    if (!claims) {
+      claims = new WeakSet();
+      ownerSizeClaims.set(owner, claims);
+    }
+    claims.add(claim);
   }
 
   const currentSize = terminal.getSize();
@@ -27,6 +37,11 @@ export function applyTerminalSize(
     terminal.send({ type: "resize", rows: request.rows, cols: request.cols });
   }
   return true;
+}
+
+function ownsTerminalSize(terminal: TerminalSession, owner: object): boolean {
+  const claim = terminalSizeClaims.get(terminal);
+  return claim !== undefined && ownerSizeClaims.get(owner)?.has(claim) === true;
 }
 
 function resolveTerminalSizeIntent(intent: TerminalSizeRequest["intent"]): "claim" | "update" {

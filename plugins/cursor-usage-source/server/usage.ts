@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { loadNodeBuiltin } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import {
   toneFromUsedPct,
@@ -125,10 +126,15 @@ function cursorTokenFromDb(db: CursorStateDatabase): string | null {
 async function readCursorTokenFromSqlite(path: string): Promise<string | null> {
   // Held in a variable so TypeScript skips module resolution: @types/node@20 has no
   // node:sqlite typings yet, while the runtime (Node 22+ / Electron) provides it.
+  // loadNodeBuiltin, not import(): scriptc refuses import() of a builtin it lacks at build time.
   const sqliteSpecifier: string = "node:sqlite";
+  // A scriptc binary has no node:sqlite.
+  if (process.argv[0] === "scriptc") return null;
   let sqlite: NodeSqliteModule;
   try {
-    sqlite = (await import(sqliteSpecifier)) as unknown as NodeSqliteModule;
+    const loaded = loadNodeBuiltin(sqliteSpecifier);
+    if (!loaded) return null; // runtime without node:sqlite
+    sqlite = loaded as NodeSqliteModule;
   } catch {
     return null; // runtime without node:sqlite
   }

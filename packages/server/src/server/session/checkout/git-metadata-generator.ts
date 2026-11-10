@@ -99,29 +99,6 @@ export function createGitMetadataGenerator(deps: {
 }): GitMetadataGenerator {
   const { workspaceGitService, generation, logger } = deps;
 
-  async function generateOrFallback<T>(
-    request: StructuredTextGenerationRequest<T>,
-    fallback: T,
-  ): Promise<T> {
-    try {
-      return await generation.generate(request);
-    } catch (error) {
-      if (!isStructuredGenerationFailure(error)) {
-        throw error;
-      }
-      logger.error(
-        {
-          err: error,
-          cwd: request.cwd,
-          schemaName: request.schemaName,
-          attempts: error instanceof StructuredAgentFallbackError ? error.attempts : undefined,
-        },
-        "Structured git metadata generation failed",
-      );
-      return fallback;
-    }
-  }
-
   async function buildPromptForDiff(input: PromptForDiffInput): Promise<string> {
     const diff = await workspaceGitService.getCheckoutDiff(input.cwd, input.diffOptions);
     const fileList = renderFileList(diff.structured);
@@ -153,6 +130,8 @@ export function createGitMetadataGenerator(deps: {
         jsonFieldsHint: "Return JSON only with a single field 'message'.",
       });
       const result = await generateOrFallback(
+        generation,
+        logger,
         {
           cwd,
           prompt,
@@ -176,6 +155,8 @@ export function createGitMetadataGenerator(deps: {
         jsonFieldsHint: "Return JSON only with fields 'title' and 'body'.",
       });
       return generateOrFallback(
+        generation,
+        logger,
         {
           cwd,
           prompt,
@@ -228,6 +209,32 @@ export function createAgentStructuredTextGeneration(deps: {
       });
     },
   };
+}
+
+// Top level: scriptc only lowers generic functions declared at module scope.
+async function generateOrFallback<T>(
+  generation: StructuredTextGeneration,
+  logger: GitMetadataLogger,
+  request: StructuredTextGenerationRequest<T>,
+  fallback: T,
+): Promise<T> {
+  try {
+    return await generation.generate(request);
+  } catch (error) {
+    if (!isStructuredGenerationFailure(error)) {
+      throw error;
+    }
+    logger.error(
+      {
+        err: error,
+        cwd: request.cwd,
+        schemaName: request.schemaName,
+        attempts: error instanceof StructuredAgentFallbackError ? error.attempts : undefined,
+      },
+      "Structured git metadata generation failed",
+    );
+    return fallback;
+  }
 }
 
 function renderFileList(structured: CheckoutDiff["structured"]): string {

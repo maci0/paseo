@@ -56,20 +56,24 @@ export function createSshTunnel(target: SshTransportTarget): Promise<SshTunnel> 
       });
       const fail = (error: Error) => {
         failure = error.message;
-        acceptedSocket.destroy(error);
+        acceptedSocket.destroy();
       };
       child.on("error", fail);
       child.stdin.on("error", fail);
       child.on("exit", (code, signal) => {
         if (code !== 0 || signal) failure = formatSshFailure(stderr, code, signal);
-        acceptedSocket.destroy(failure ? new Error(failure) : undefined);
+        if (failure) acceptedSocket.destroy();
       });
       acceptedSocket.on("error", () => undefined);
       acceptedSocket.on("close", () => {
         if (child && !child.killed) child.kill();
       });
-      acceptedSocket.pipe(child.stdin);
-      child.stdout.pipe(acceptedSocket);
+      acceptedSocket.on("data", (chunk: Buffer) => {
+        child?.stdin.write(chunk);
+      });
+      child.stdout.on("data", (chunk: Buffer) => {
+        acceptedSocket.write(chunk);
+      });
     });
     server.once("error", (error) => {
       close();

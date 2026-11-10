@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Logger } from "pino";
 import { z } from "zod";
 
-import { terminateWithTreeKill } from "../../../../utils/tree-kill.js";
+import { terminateChildWithTreeKill } from "../../../../utils/tree-kill.js";
 
 import { ProviderLineReader, ProviderStreamLimitError } from "../jsonl-frame-decoder.js";
 
@@ -303,7 +303,7 @@ export class CodexAppServerClient {
     } catch {
       // ignore
     }
-    const result = await terminateWithTreeKill(this.child, {
+    const result = await terminateChildWithTreeKill(this.child, {
       gracefulTimeoutMs: APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
       forceTimeoutMs: APP_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS,
       onForceSignal: () => {
@@ -415,7 +415,8 @@ export class CodexAppServerClient {
       }
 
       if (isJsonRpcRequest(raw)) {
-        const request = raw;
+        // scriptc cannot pick a union arm for the narrowed response-and-request record; name it.
+        const request: JsonRpcRequest = raw;
         this.traceRawEvent(request);
         const handler = this.requestHandlers.get(request.method);
         try {

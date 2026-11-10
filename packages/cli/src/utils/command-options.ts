@@ -24,7 +24,8 @@ export function addJsonOption<T extends Command>(command: T): T {
 
 export function addDaemonHostOption<T extends Command>(command: T): T {
   command.option("--host <host>", DAEMON_HOST_OPTION_DESCRIPTION);
-  if (!command.options.some((option) => option.long === "--home"))
+  const current = command.opts() as { home?: unknown };
+  if (!("home" in current))
     command.option("--home <path>", "Select a local daemon home (default: ~/.paseo)");
   return command;
 }
@@ -33,27 +34,37 @@ export function addJsonAndDaemonHostOptions<T extends Command>(command: T): T {
   return addDaemonHostOption(addJsonOption(command));
 }
 
-export function withGlobalOptions<Args extends unknown[], Result>(
-  handler: (...args: Args) => Result,
-): (...args: Args) => Result {
-  return (...args) => {
-    const command = args.at(-1) as Command;
-    const mergedArgs = [...args];
-    const options = command.optsWithGlobals();
-    const selectors = { home: new Set<string>(), host: new Set<string>() };
+export function withGlobalOptions(
+  handler: (a?: any, b?: any, c?: any, d?: any) => any,
+): (a?: any, b?: any, c?: any, d?: any) => any {
+  return (a?: any, b?: any, c?: any, d?: any) => {
+    const command = (d !== undefined ? d : c !== undefined ? c : b) as Command;
+    const options = command.optsWithGlobals() as Record<string, unknown>;
+    const selectors = { home: [] as string[], host: [] as string[] };
     for (let current: Command | null = command; current; current = current.parent) {
-      for (const key of ["home", "host"] as const) {
-        const value = current.opts()[key];
-        if (typeof value === "string") selectors[key].add(value);
-      }
+      const currentOptions = current.opts() as Record<string, unknown>;
+      const home = currentOptions.home;
+      const host = currentOptions.host;
+      if (typeof home === "string" && !selectors.home.includes(home)) selectors.home.push(home);
+      if (typeof host === "string" && !selectors.host.includes(host)) selectors.host.push(host);
     }
-    for (const key of ["home", "host"] as const) {
-      if (selectors[key].size > 1)
-        throw { code: "TARGET_AMBIGUOUS", message: `Conflicting duplicate --${key} selectors.` };
+    if (selectors.home.length > 1) {
+      throw { code: "TARGET_AMBIGUOUS", message: "Conflicting duplicate --home selectors." };
+    }
+    if (selectors.host.length > 1) {
+      throw { code: "TARGET_AMBIGUOUS", message: "Conflicting duplicate --host selectors." };
     }
     const localOnly = localCommands.has(command);
-    options.daemonTarget = selectDaemonTarget(options, process.env, localOnly);
-    mergedArgs[mergedArgs.length - 2] = options;
-    return handler(...(mergedArgs as Args));
+    options.daemonTarget = selectDaemonTarget(
+      {
+        home: typeof options.home === "string" ? options.home : undefined,
+        host: typeof options.host === "string" ? options.host : undefined,
+      },
+      process.env,
+      localOnly,
+    );
+    if (d !== undefined) return handler(a, b, options, d);
+    if (c !== undefined) return handler(a, options, c, d);
+    return handler(options, b, c, d);
   };
 }

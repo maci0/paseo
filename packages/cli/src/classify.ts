@@ -43,7 +43,7 @@ export function isExistingDirectory(input: { pathArg: string; cwd: string }): bo
 
 export function classifyInvocation(input: {
   argv: string[];
-  knownCommands: ReadonlySet<string>;
+  knownCommands: readonly string[];
   cwd: string;
 }): CliInvocation {
   const [firstArg] = input.argv;
@@ -55,7 +55,7 @@ export function classifyInvocation(input: {
     return { kind: "cli", argv: input.argv };
   }
 
-  if (input.knownCommands.has(firstArg)) {
+  if (input.knownCommands.includes(firstArg)) {
     return { kind: "cli", argv: input.argv };
   }
 

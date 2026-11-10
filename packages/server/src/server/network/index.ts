@@ -1,6 +1,28 @@
 import type { Agent } from "node:http";
-import { EnvHttpProxyAgent, Pool, setGlobalDispatcher } from "undici";
+import { requireNodeOnly } from "../node-only-require.js";
+import type * as UndiciPackage from "undici/types/index.js";
 import { HttpsProxyAgent } from "https-proxy-agent";
+
+// scriptc cannot compile a function whose signature names an undici class, and a
+// `typeof` of the undici module makes it compile the package (SC2013), so code uses these
+// interfaces of the same shape.
+interface UndiciDispatcher extends UndiciPackage.Dispatcher {}
+interface UndiciPool extends UndiciPackage.Pool {}
+interface Undici {
+  EnvHttpProxyAgent: new (options: UndiciPackage.EnvHttpProxyAgent.Options) => UndiciDispatcher;
+  Pool: new (origin: URL, options: object) => UndiciPool;
+  setGlobalDispatcher(dispatcher: UndiciDispatcher): void;
+}
+
+// scriptc 0.4.10 compiles its own undici in place of the package, and that build fails for
+// any import of "undici", so only Node loads it, through requireNodeOnly. A scriptc binary reports
+// process.argv[0] as "scriptc"; its global fetch is the runtime's own and reads no proxy
+// variables.
+function loadUndici(): Undici {
+  return requireNodeOnly("undici") as Undici;
+}
+
+const undici = process.argv[0] === "scriptc" ? undefined : loadUndici();
 
 interface ProxyEnvironment {
   httpProxy: string;
@@ -56,7 +78,7 @@ function bypassList(noProxy: string): string {
   return noProxy.split(/[,\s]+/).includes("*") ? "*" : `${noProxy},localhost,127.0.0.1,[::1],::1`;
 }
 
-function proxyClient(origin: URL, options: object) {
+function proxyClient(Pool: Undici["Pool"], origin: URL, options: object): UndiciDispatcher {
   const pool = new Pool(origin, options);
   if (!origin.username && !origin.password) return pool;
   const credentials = `${decodeURIComponent(origin.username)}:${decodeURIComponent(origin.password)}`;
@@ -82,12 +104,14 @@ export function initializeEnvironmentProxy(
 ): string[] {
   const resolved = readEnvironment(env, platform);
   environment = resolved.environment;
-  setGlobalDispatcher(
-    new EnvHttpProxyAgent({
+  if (undici === undefined) return resolved.ignored;
+  const { Pool } = undici;
+  undici.setGlobalDispatcher(
+    new undici.EnvHttpProxyAgent({
       httpProxy: environment.httpProxy,
       httpsProxy: environment.httpsProxy,
       noProxy: bypassList(environment.noProxy),
-      clientFactory: proxyClient,
+      clientFactory: (origin, options) => proxyClient(Pool, origin, options),
     }),
   );
   return resolved.ignored;
@@ -106,7 +130,8 @@ export function webSocketProxyAgent(address: string): Agent | undefined {
       if (entry === "*") return true;
       const match = entry.match(/^(.+):(\d+)$/);
       if (match && Number(match[2]) !== Number(port)) return false;
-      const host = (match ? match[1]! : entry).replace(/^\*?\./, "");
+      const pattern = match ? match[1]! : entry;
+      const host = pattern.replace(/^\*?\./, "");
       return host !== "" && (hostname === host || hostname.endsWith(`.${host}`));
     })
   )

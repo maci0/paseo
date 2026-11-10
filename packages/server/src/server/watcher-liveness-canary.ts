@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { setInterval } from "node:timers/promises";
 import type { FileChange } from "./file-observer/index.js";
 
 export const WATCHER_LIVENESS_CANARY_TIMEOUT_MS = 10_000;
@@ -73,9 +72,31 @@ export function createWatcherLivenessCanary(
   };
 }
 
+const CANARY_PULSE_INTERVAL_MS = 100;
+
+// scriptc's timers/promises setInterval takes no AbortSignal, so each pulse waits on a
+// plain timer that an abort clears. Resolves false once the signal aborts.
+function waitForNextPulse(signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  let settle: (pulse: boolean) => void = () => {};
+  const next = new Promise<boolean>((resolve) => {
+    settle = resolve;
+  });
+  const onAbort = () => {
+    clearTimeout(timer);
+    settle(false);
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", onAbort);
+    settle(true);
+  }, CANARY_PULSE_INTERVAL_MS);
+  signal.addEventListener("abort", onAbort, { once: true });
+  return next;
+}
+
 async function pulseCanary(path: string, signal: AbortSignal): Promise<void> {
   try {
-    for await (const _ of setInterval(100, undefined, { signal })) {
+    while (await waitForNextPulse(signal)) {
       await writeFile(path, CANARY_CONTENTS);
     }
   } catch (error) {

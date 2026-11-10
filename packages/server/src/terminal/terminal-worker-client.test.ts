@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { createServer as createNetServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { isPlatform } from "../test-utils/platform.js";
@@ -15,6 +16,12 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function rethrowFrameError(error: Error): never {
+  throw error;
+}
+
+function ignoreSocketError(): void {}
 
 async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -41,6 +48,32 @@ describe("terminal worker frames", () => {
     const header = Buffer.alloc(4);
     header.writeUInt32BE(0xffffffff, 0);
     expect(() => new FrameDecoder().push(header)).toThrow(TerminalWorkerFrameError);
+  });
+
+  it("fails a connection with the decode error of a malformed first frame", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "tw-frame-"));
+    temporaryDirs.push(dir);
+    const socketPath = path.join(dir, "worker.sock");
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(0xffffffff, 0);
+    const peers: Socket[] = [];
+    function acceptPeer(socket: Socket): void {
+      peers.push(socket);
+      socket.on("error", ignoreSocketError);
+      socket.write(header);
+    }
+    const server = createNetServer(acceptPeer);
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    try {
+      await expect(
+        connectTerminalWorker({ socketPath, secret: "secret", timeoutMs: 5_000 }),
+      ).rejects.toThrow(
+        /^Cannot connect to terminal worker at .*: Terminal worker frame of 4294967295 bytes is too large$/,
+      );
+    } finally {
+      for (const peer of peers) peer.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
@@ -86,11 +119,15 @@ it("bounds a stalled framed writer to one chunk and resumes in order", async () 
   const reader = createConnection(address.port, "127.0.0.1");
   reader.pause();
   const writer = await accepted;
-  const framed = attachFramedSocket(writer, () => {});
+  const framed = attachFramedSocket(writer, () => {}, rethrowFrameError);
   let completed = 0;
   let peakQueuedBytes = 0;
   const received: number[] = [];
-  attachFramedSocket(reader, (value) => received.push((value as { index: number }).index));
+  attachFramedSocket(
+    reader,
+    (value) => received.push((value as { index: number }).index),
+    rethrowFrameError,
+  );
   const sending = (async () => {
     for (let index = 0; index < 512; index++) {
       const pending = framed.sendAndWait({ index, data: Buffer.alloc(64 * 1024) });

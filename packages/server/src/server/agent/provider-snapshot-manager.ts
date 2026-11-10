@@ -1,13 +1,12 @@
 import { normalizeAgentModelCatalog } from "@getpaseo/protocol/agent-types";
 import { createHash } from "node:crypto";
-import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import type { Logger } from "pino";
-import pLimit, { type LimitFunction } from "p-limit";
 
+import { ConcurrencyLimit } from "../../utils/concurrency-limit.js";
 import { expandTilde } from "../../utils/path.js";
 import { withTimeout } from "../../utils/promise-timeout.js";
 import {
@@ -217,7 +216,7 @@ interface RegistryGeneration {
   order: readonly AgentProvider[];
   providerStates: ReadonlyMap<
     AgentProvider,
-    { initial: ProviderSnapshotRecord; discoveryLimit: LimitFunction }
+    { initial: ProviderSnapshotRecord; discoveryLimit: ConcurrencyLimit }
   >;
 }
 
@@ -236,7 +235,9 @@ interface ProviderSnapshotTarget {
 export class ProviderSnapshotManager {
   private readonly catalogs = new Map<string, Map<AgentProvider, ProviderCatalog>>();
   private readonly targets = new Map<string, Target>();
-  private readonly events = new EventEmitter();
+  // A listener array in place of an EventEmitter: scriptc cannot iterate an emitter's listeners.
+  // Ordering and removal follow EventEmitter: registration order, `off` removes the latest copy.
+  private readonly changeListeners: ProviderSnapshotChangeListener[] = [];
   private destroyed = false;
   private refreshTimeoutMs: number;
   private diagnosticTimeoutMs: number;
@@ -676,13 +677,14 @@ export class ProviderSnapshotManager {
     this.diagnosticTimeoutMs = resolveDiagnosticTimeoutMs(undefined, this.refreshTimeoutMs);
   }
 
-  on(event: "change", listener: ProviderSnapshotChangeListener): this {
-    this.events.on(event, listener);
+  on(_event: "change", listener: ProviderSnapshotChangeListener): this {
+    this.changeListeners.push(listener);
     return this;
   }
 
-  off(event: "change", listener: ProviderSnapshotChangeListener): this {
-    this.events.off(event, listener);
+  off(_event: "change", listener: ProviderSnapshotChangeListener): this {
+    const index = this.changeListeners.lastIndexOf(listener);
+    if (index >= 0) this.changeListeners.splice(index, 1);
     return this;
   }
 
@@ -701,7 +703,7 @@ export class ProviderSnapshotManager {
     for (const state of this.generation.providerStates.values()) state.discoveryLimit.clearQueue();
     this.catalogs.clear();
     this.targets.clear();
-    this.events.removeAllListeners();
+    this.changeListeners.length = 0;
   }
 
   private buildRegistry(
@@ -834,7 +836,7 @@ export class ProviderSnapshotManager {
     const order = Object.keys(definitions);
     const providerStates = new Map<
       AgentProvider,
-      { initial: ProviderSnapshotRecord; discoveryLimit: LimitFunction }
+      { initial: ProviderSnapshotRecord; discoveryLimit: ConcurrencyLimit }
     >();
     for (const provider of order) {
       const definition = definitions[provider]!;
@@ -847,7 +849,8 @@ export class ProviderSnapshotManager {
         this.pluginProviders.has(provider) ||
         (!BUILTIN_PROVIDER_IDS.includes(provider) && !!overrides?.[provider]?.extends);
       providerStates.set(provider, {
-        discoveryLimit: previous?.discoveryLimit ?? pLimit({ concurrency: 4, rejectOnClear: true }),
+        discoveryLimit:
+          previous?.discoveryLimit ?? new ConcurrencyLimit(4, { rejectOnClear: true }),
         initial: identifyEntry({
           provider,
           status: definition.enabled ? "loading" : "unavailable",
@@ -968,11 +971,14 @@ export class ProviderSnapshotManager {
     catalog.stale = false;
 
     const current = catalog;
+    // Declared before the closures that read it: scriptc cannot capture a `const` before its
+    // declaration. Both closures run only after the assignment below.
+    let load: Promise<void> | undefined;
     const isCurrent = (): boolean =>
       !this.destroyed && this.catalogs.get(key)?.get(provider) === current && current.load === load;
-    const load = this.generation.providerStates
+    load = this.generation.providerStates
       .get(provider)!
-      .discoveryLimit(() => {
+      .discoveryLimit.run(async () => {
         if (!isCurrent()) return;
         return this.refreshProvider({
           catalogOptions,
@@ -1038,7 +1044,7 @@ export class ProviderSnapshotManager {
         return;
       }
 
-      const models = normalizeAgentModelCatalog(catalog.models);
+      const models: AgentModelDefinition[] = normalizeAgentModelCatalog(catalog.models);
       if (models.length !== catalog.models.length) {
         this.logger.warn(
           { provider, discardedRows: catalog.models.length - models.length },
@@ -1090,7 +1096,8 @@ export class ProviderSnapshotManager {
       transitions.push({ previous, current });
     }
     for (const transition of transitions) {
-      for (const listener of this.events.listeners("change")) {
+      // A copy, as EventEmitter.listeners() returns: subscribers may unsubscribe during dispatch.
+      for (const listener of this.changeListeners.slice()) {
         try {
           listener(transition);
         } catch (error) {

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { type Dirent, promises as fs } from "node:fs";
 import path from "node:path";
 import type { AgentSkillSelection } from "@getpaseo/protocol/messages";
 import {
@@ -57,7 +57,7 @@ type TargetSkills = Map<string, SkillFiles>;
  * what makes `all` pick up skills added in a later release with no code change.
  */
 async function listBundledSkills(sourceDir: string): Promise<string[]> {
-  const entries = await fs.readdir(sourceDir, { withFileTypes: true }).catch(() => []);
+  const entries = await fs.readdir(sourceDir, { withFileTypes: true }).catch((): Dirent[] => []);
   return entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)

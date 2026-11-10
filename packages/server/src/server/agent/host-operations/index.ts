@@ -86,7 +86,7 @@ export function createToolHosts(hosts: ConnectedHosts): ToolHosts {
       const transportFactory: DaemonTransportFactory = () => {
         const opens = new Set<() => void>();
         const closes = new Set<(event?: unknown) => void>();
-        const errors = new Set<(event: unknown) => void>();
+        const errors = new Set<(event?: unknown) => void>();
         const messages = new Set<(data: unknown, binary: boolean) => void>();
         let closed = false;
         let route: Awaited<ReturnType<ConnectedHosts["openRoute"]>> | undefined;
@@ -127,19 +127,19 @@ export function createToolHosts(hosts: ConnectedHosts): ToolHosts {
             closed = true;
             route?.close();
           },
-          onOpen: (listener) => {
+          onOpen: (listener: () => void) => {
             opens.add(listener);
             return () => opens.delete(listener);
           },
-          onClose: (listener) => {
+          onClose: (listener: (event?: unknown) => void) => {
             closes.add(listener);
             return () => closes.delete(listener);
           },
-          onError: (listener) => {
+          onError: (listener: (event?: unknown) => void) => {
             errors.add(listener);
             return () => errors.delete(listener);
           },
-          onMessage: (listener) => {
+          onMessage: (listener: (data: unknown, binary: boolean) => void) => {
             messages.add(listener);
             return () => messages.delete(listener);
           },

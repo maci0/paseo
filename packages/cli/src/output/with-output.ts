@@ -4,7 +4,6 @@
  * Wraps command handlers to automatically render results and handle errors.
  */
 
-import type { Command } from "commander";
 import type { AnyCommandResult, CommandError, OutputOptions } from "./types.js";
 import { render, renderError, toCommandError, defaultOutputOptions } from "./render.js";
 import { withGlobalOptions } from "../utils/command-options.js";
@@ -77,15 +76,15 @@ function extractOutputOptions(options: CommandOptions): OutputOptions {
  *   }))
  * ```
  */
-export function withOutput<T, Args extends unknown[]>(
-  handler: (...args: [...Args, CommandOptions, Command]) => Promise<AnyCommandResult<T>>,
-): (...args: [...Args, CommandOptions, Command]) => Promise<void> {
-  return withGlobalOptions(async (...args) => {
-    const options = args[args.length - 2] as CommandOptions;
+export function withOutput(
+  handler: (a?: any, b?: any, c?: any, d?: any) => Promise<AnyCommandResult<any>>,
+): (a?: any, b?: any, c?: any, d?: any) => Promise<void> {
+  const wrapped = async (a?: any, b?: any, c?: any, d?: any): Promise<void> => {
+    const options = (d !== undefined ? c : c !== undefined ? b : a) as CommandOptions;
     const outputOptions = extractOutputOptions(options);
 
     try {
-      const result = await handler(...args);
+      const result = await handler(a, b, c, d);
       const output = render(result, outputOptions);
 
       if (output) {
@@ -97,7 +96,8 @@ export function withOutput<T, Args extends unknown[]>(
       process.stderr.write(errorOutput + "\n");
       process.exit(1);
     }
-  });
+  };
+  return withGlobalOptions(wrapped);
 }
 
 /**

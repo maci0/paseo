@@ -573,11 +573,11 @@ async function requestWorkerShutdown(
     return;
   }
   const responded = new Promise<void>((resolve) => {
-    connection.on("message", (message) => {
+    connection.onMessage((message) => {
       if (message.type === "response") resolve();
     });
   });
-  const closed = new Promise<void>((resolve) => connection.on("close", () => resolve()));
+  const closed = new Promise<void>((resolve) => connection.onClose(() => resolve()));
   const sendFailed = new Promise<void>((resolve) => {
     connection.send({ type: "shutdown", requestId: randomUUID() }, (error) => {
       if (error) resolve();

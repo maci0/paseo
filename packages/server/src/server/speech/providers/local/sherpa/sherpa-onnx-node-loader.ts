@@ -18,6 +18,16 @@ export interface SherpaOnnxNodeModule {
 }
 
 let cached: SherpaOnnxNodeModule | null = null;
+let registered: SherpaOnnxNodeModule | null = null;
+
+/**
+ * Supplies the module loadSherpaOnnxNode returns instead of the addon. A scriptc binary cannot
+ * load Node-API addons, so its speech worker entry registers the FFI module with the addon's
+ * classes (native/sherpa/sherpa-onnx-ffi.ts in the turbopaseo repo) before creating any.
+ */
+export function registerSherpaOnnxNode(module: SherpaOnnxNodeModule): void {
+  registered = module;
+}
 
 interface LoadAttempt {
   target: string;
@@ -99,6 +109,14 @@ function buildFailure(attempts: LoadAttempt[], pkgName: string): Error {
 export function loadSherpaOnnxNode(): SherpaOnnxNodeModule {
   if (cached) {
     return cached;
+  }
+  if (registered) {
+    cached = registered;
+    return cached;
+  }
+  // A scriptc binary reports process.argv[0] as "scriptc".
+  if (process.argv[0] === "scriptc") {
+    throw new Error("sherpa-onnx: no module registered; native builds call registerSherpaOnnxNode");
   }
 
   const require = createRequire(import.meta.url);

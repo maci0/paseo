@@ -2,13 +2,15 @@ import type { ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import net from "node:net";
-import { createRequire } from "node:module";
 import path from "node:path";
 import type { Logger } from "pino";
 
 import { findExecutable } from "../../../../executable-resolution/executable-resolution.js";
 import { spawnProcess, type SpawnProcessOptions } from "../../../../utils/spawn.js";
-import { terminateWithTreeKill, type ProcessTerminator } from "../../../../utils/tree-kill.js";
+import {
+  terminateChildWithTreeKill,
+  type ChildProcessTerminator,
+} from "../../../../utils/tree-kill.js";
 import type { ManagedProcessRegistry } from "../../../managed-processes/managed-processes.js";
 import {
   createProviderEnv,
@@ -16,6 +18,7 @@ import {
   type ProviderRuntimeSettings,
 } from "../../provider-launch-config.js";
 import { resolveOpenCodeHomeDir } from "./paths.js";
+import { requireNodeOnly } from "../../../node-only-require.js";
 import {
   OpenCodeEventConsumer,
   type OpenCodeEventConsumerFactory,
@@ -70,7 +73,7 @@ export interface OpenCodeServerManagerOptions {
   baseEnv?: SpawnProcessOptions["baseEnv"];
   runtimeSettings?: ProviderRuntimeSettings;
   managedProcesses?: ManagedProcessRegistry;
-  terminateProcess?: ProcessTerminator;
+  terminateProcess?: ChildProcessTerminator;
   portAllocator?: OpenCodePortAllocator;
   resolveCommandPrefix?: OpenCodeCommandPrefixResolver;
   resolveHomeDir?: () => string;
@@ -91,7 +94,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly runtimeSettingsKey: string;
   private readonly managedProcesses?: ManagedProcessRegistry;
-  private readonly terminateProcess: ProcessTerminator;
+  private readonly terminateProcess: ChildProcessTerminator;
   private readonly portAllocator: OpenCodePortAllocator;
   private readonly resolveCommandPrefix: OpenCodeCommandPrefixResolver;
   private readonly resolveHomeDir: () => string;
@@ -105,7 +108,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     this.runtimeSettings = options.runtimeSettings;
     this.runtimeSettingsKey = JSON.stringify(this.runtimeSettings ?? {});
     this.managedProcesses = options.managedProcesses;
-    this.terminateProcess = options.terminateProcess ?? terminateWithTreeKill;
+    this.terminateProcess = options.terminateProcess ?? terminateChildWithTreeKill;
     this.portAllocator = options.portAllocator ?? findAvailablePort;
     this.resolveCommandPrefix =
       options.resolveCommandPrefix ??
@@ -650,7 +653,7 @@ async function resolveOpenCodeBinary(): Promise<string> {
       // Newer npm releases keep the executable in a platform dependency.
       // Resolve from the CLI package so nested installs and pnpm both work.
       try {
-        const require = createRequire(path.join(packageDirectory, "package.json"));
+        const require = loadNodeCreateRequire()(path.join(packageDirectory, "package.json"));
         return require.resolve(`opencode-windows-${process.arch}/bin/opencode.exe`);
       } catch {
         // Try the other npm layout before retaining the original command.
@@ -665,6 +668,16 @@ async function resolveOpenCodeBinary(): Promise<string> {
   }
 
   return found;
+}
+
+type CreateRequire = (filename: string) => { resolve(request: string): string };
+
+// scriptc has no lowering for createRequire of a runtime path or for require.resolve of a computed
+// request, so this Windows-only lookup loads Node's createRequire through requireNodeOnly,
+// which scriptc leaves to run time.
+function loadNodeCreateRequire(): CreateRequire {
+  const loaded = requireNodeOnly("node:module") as { createRequire: CreateRequire };
+  return loaded.createRequire;
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

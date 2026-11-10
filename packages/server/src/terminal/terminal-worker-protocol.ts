@@ -208,3 +208,73 @@ export type TerminalWorkerToParentMessage = TerminalWorkerResponse | TerminalWor
 export type TerminalWorkerListResult = WorkerListedTerminal[];
 
 export type TerminalWorkerCaptureResult = CaptureTerminalLinesResult;
+
+type RequestArm<T extends TerminalWorkerRequest["type"]> = Extract<
+  TerminalWorkerRequest,
+  { type: T }
+>;
+type MessageArm<T extends TerminalWorkerToParentMessage["type"]> = Extract<
+  TerminalWorkerToParentMessage,
+  { type: T }
+>;
+
+// Frames decode to untyped data. These give a decoded frame its protocol type one arm at a
+// time, selected by `type` (and `ok` for responses): a scriptc binary cannot map untyped data
+// onto a whole union of records whose arms share fields, and narrowing such a value fails at
+// run time. Under Node they are casts. Shapes are not validated: the peer is authenticated by
+// the record secret and speaks this protocol version. An unknown `type` keeps the plain cast.
+
+export function decodeTerminalWorkerRequest(raw: unknown): TerminalWorkerRequest {
+  switch ((raw as { type?: unknown }).type) {
+    case "createTerminal":
+      return raw as RequestArm<"createTerminal">;
+    case "registerCwdEnv":
+      return raw as RequestArm<"registerCwdEnv">;
+    case "setActivity":
+      return raw as RequestArm<"setActivity">;
+    case "clearAttention":
+      return raw as RequestArm<"clearAttention">;
+    case "killTerminal":
+      return raw as RequestArm<"killTerminal">;
+    case "killTerminalAndWait":
+      return raw as RequestArm<"killTerminalAndWait">;
+    case "replayTerminal":
+      return raw as RequestArm<"replayTerminal">;
+    case "captureTerminal":
+      return raw as RequestArm<"captureTerminal">;
+    case "listTerminals":
+      return raw as RequestArm<"listTerminals">;
+    case "shutdown":
+      return raw as RequestArm<"shutdown">;
+    case "send":
+      return raw as RequestArm<"send">;
+    default:
+      return raw as TerminalWorkerRequest;
+  }
+}
+
+export function decodeTerminalWorkerToParentMessage(raw: unknown): TerminalWorkerToParentMessage {
+  const fields = raw as { type?: unknown; ok?: unknown };
+  switch (fields.type) {
+    case "response":
+      return fields.ok === true
+        ? (raw as Extract<MessageArm<"response">, { ok: true }>)
+        : (raw as Extract<MessageArm<"response">, { ok: false }>);
+    case "terminalReplay":
+      return raw as MessageArm<"terminalReplay">;
+    case "terminalCreated":
+      return raw as MessageArm<"terminalCreated">;
+    case "terminalMessage":
+      return raw as MessageArm<"terminalMessage">;
+    case "terminalExit":
+      return raw as MessageArm<"terminalExit">;
+    case "terminalTitleChange":
+      return raw as MessageArm<"terminalTitleChange">;
+    case "terminalCommandFinished":
+      return raw as MessageArm<"terminalCommandFinished">;
+    case "terminalActivityChange":
+      return raw as MessageArm<"terminalActivityChange">;
+    default:
+      return raw as TerminalWorkerToParentMessage;
+  }
+}

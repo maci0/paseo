@@ -14,7 +14,7 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, delimiter, dirname, extname, join, resolve as resolvePath } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { createExternalProcessEnv } from "../server/paseo-env.js";
+import { createExternalProcessEnv, type ProcessEnvRecord } from "../server/paseo-env.js";
 import {
   resolveExternalProcessPath,
   resolvePaseoCliBinDir,
@@ -232,6 +232,11 @@ export function ensureNodePtySpawnHelperExecutableForCurrentPlatform(
   if (platform !== "darwin") {
     return;
   }
+  // A scriptc binary (argv[0] "scriptc") uses native/pty in place of node-pty: no package to
+  // resolve and no spawn-helper.
+  if (process.argv[0] === "scriptc") {
+    return;
+  }
   if (nodePtySpawnHelperChecked && !options.force) {
     return;
   }
@@ -417,6 +422,11 @@ export async function resolveTerminalSpawnCommand(
 export { resolvePaseoCliBinDir, resolvePaseoCliExecutablePath };
 
 export function resolveZshShellIntegrationDir(): string {
+  // In a scriptc binary (process.argv[0] "scriptc") import.meta.url is the source path on the
+  // build machine, so the files ship beside the executable as shell-integration/zsh.
+  if (process.argv[0] === "scriptc") {
+    return join(dirname(process.execPath), "shell-integration", "zsh");
+  }
   return fileURLToPath(new URL("./shell-integration/zsh", import.meta.url));
 }
 
@@ -449,8 +459,10 @@ function prepareZshShellIntegrationRuntimeDir(sourceDir = resolveZshShellIntegra
 export function buildTerminalEnvironment(
   input: BuildTerminalEnvironmentInput,
 ): Record<string, string> {
+  // Widened before `??`: scriptc needs both operands to have one type.
+  const callerBaseEnv: ProcessEnvRecord | undefined = input.baseEnv;
   const baseEnv: Record<string, string> = createExternalProcessEnv(
-    input.baseEnv ?? process.env,
+    callerBaseEnv ?? process.env,
     input.env,
     {
       TERM: "xterm-256color",

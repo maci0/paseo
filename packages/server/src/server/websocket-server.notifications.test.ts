@@ -35,6 +35,8 @@ const wsModuleMock = vi.hoisted(() => {
 
 vi.mock("ws", () => ({
   WebSocketServer: wsModuleMock.MockWebSocketServer,
+  // @getpaseo/client's node transport subclasses WebSocket when it loads.
+  WebSocket: class {},
 }));
 
 vi.mock("./session.js", () => ({

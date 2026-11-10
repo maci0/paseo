@@ -59,7 +59,11 @@ import {
   CHECK_TRAIT_WARNING,
 } from "@getpaseo/protocol/check-traits";
 import { GITLAB_ACTIVE_PIPELINE_STATUS_SET } from "@getpaseo/protocol/gitlab-pipeline";
-import { isGitLabStatusFacts, type GitLabStatusFacts } from "./gitlab-facts.js";
+import {
+  isGitLabStatusFacts,
+  type GitLabForgeSpecificStatusFacts,
+  type GitLabStatusFacts,
+} from "./gitlab-facts.js";
 
 const GLAB_ENV = {
   GIT_TERMINAL_PROMPT: "0",
@@ -415,11 +419,13 @@ function countApprovalsGiven(approvals: GitLabApprovals | null | undefined): num
   return null;
 }
 
-function toGitLabStatusFacts(
+// Builds the envelope in one literal: scriptc cannot spread a record into an index-signature shape.
+function toGitLabForgeSpecificStatusFacts(
   mr: GitLabMergeRequest,
   approvals?: GitLabApprovals | null,
-): GitLabStatusFacts {
+): GitLabForgeSpecificStatusFacts {
   return {
+    forge: "gitlab",
     detailedMergeStatus: mr.detailed_merge_status ?? null,
     mergeStatus: mr.merge_status ?? null,
     hasConflicts: mr.has_conflicts ?? false,
@@ -739,7 +745,7 @@ function toCurrentPullRequestStatus(
     // hold MRs at "pending" forever on post-success manual deploy jobs.
     checksStatus: mapPipelineChecksStatus(pipelineStatus ?? mr.head_pipeline?.status),
     reviewDecision: null,
-    forgeSpecific: { forge: "gitlab", ...toGitLabStatusFacts(mr, approvals) },
+    forgeSpecific: toGitLabForgeSpecificStatusFacts(mr, approvals),
   };
 }
 
@@ -796,7 +802,22 @@ export async function probeGitLabHost(host: string): Promise<boolean> {
 
 function getGitlabStatusFacts(status: MergePullRequestOptions["status"]): GitLabStatusFacts | null {
   const forgeSpecific = status?.forgeSpecific;
-  return isGitLabStatusFacts(forgeSpecific) ? forgeSpecific : null;
+  if (!isGitLabStatusFacts(forgeSpecific)) {
+    return null;
+  }
+  // Copied field by field: scriptc cannot convert the index-signature envelope to the record.
+  return {
+    detailedMergeStatus: forgeSpecific.detailedMergeStatus,
+    mergeStatus: forgeSpecific.mergeStatus,
+    hasConflicts: forgeSpecific.hasConflicts,
+    blockingDiscussionsResolved: forgeSpecific.blockingDiscussionsResolved,
+    approvalsRequired: forgeSpecific.approvalsRequired,
+    approvalsGiven: forgeSpecific.approvalsGiven,
+    pipelineStatus: forgeSpecific.pipelineStatus,
+    pipelineId: forgeSpecific.pipelineId,
+    pipelineUrl: forgeSpecific.pipelineUrl,
+    mergeWhenPipelineSucceeds: forgeSpecific.mergeWhenPipelineSucceeds,
+  };
 }
 
 /**
@@ -907,6 +928,71 @@ function gitLabNumberQuery(query: string | undefined): string | null {
   return trimmed && /^\d+$/.test(trimmed) ? trimmed : null;
 }
 
+// Glab command runner bound to a service instance's resolved CLI path.
+type GlabRun = (args: string[], runOptions: GlabCommandRunnerOptions) => Promise<string>;
+
+// The JSON helpers live at top level: scriptc lowers only top-level generic functions.
+// Centralize parse + validate so a malformed or empty glab payload surfaces as
+// a classified GlabCommandError (with args + cwd) instead of a raw
+// SyntaxError/ZodError that bypasses the Glab* error classification.
+async function runGlabJson<T>(
+  run: GlabRun,
+  args: string[],
+  runOptions: GlabCommandRunnerOptions,
+  schema: z.ZodType<T>,
+): Promise<T> {
+  const stdout = await run(args, runOptions);
+  return parseCliJsonOutput({
+    commandName: "glab",
+    args,
+    cwd: runOptions.cwd,
+    stdout,
+    schema,
+    createCommandError: (params) => new GlabCommandError(params),
+  });
+}
+
+// Callers pass T explicitly: scriptc infers it from the schema argument as the bare constraint.
+async function runGlabList<T extends { iid: number }>({
+  run,
+  kind,
+  input,
+  schema,
+}: {
+  run: GlabRun;
+  kind: "mr" | "issue";
+  input: ListPullRequestsOptions | ListIssuesOptions;
+  schema: z.ZodType<T[]>;
+}): Promise<T[]> {
+  const textSearch = runGlabJson(
+    run,
+    buildGitLabListArgs({ kind, input }),
+    { cwd: input.cwd },
+    schema,
+  );
+  const numberQuery = gitLabNumberQuery(input.query);
+  if (!numberQuery) return textSearch;
+
+  // GitLab text search omits IIDs, so supplement it with an open-item lookup.
+  const resource = kind === "mr" ? "merge_requests" : "issues";
+  const [numberMatches, textMatches] = await Promise.all([
+    runGlabJson(
+      run,
+      ["api", `projects/:id/${resource}?state=opened&iids[]=${numberQuery}`],
+      { cwd: input.cwd },
+      schema,
+    ),
+    textSearch,
+  ]);
+  const seen = new Set<number>();
+  const items = [...numberMatches, ...textMatches].filter((item) => {
+    if (seen.has(item.iid)) return false;
+    seen.add(item.iid);
+    return true;
+  });
+  return typeof input.limit === "number" ? items.slice(0, input.limit) : items;
+}
+
 export function createGitLabService(options: CreateGitLabServiceOptions = {}): ForgeService {
   const runner = options.runner ?? runGlabCommand;
   const resolveGlab = createCachedCliPathResolver(options.resolveGlabPath ?? resolveGlabPath);
@@ -925,35 +1011,17 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     }
   }
 
-  // Centralize parse + validate so a malformed or empty glab payload surfaces as
-  // a classified GlabCommandError (with args + cwd) instead of a raw
-  // SyntaxError/ZodError that bypasses the Glab* error classification.
-  async function runJson<T>(
-    args: string[],
-    runOptions: GlabCommandRunnerOptions,
-    schema: z.ZodType<T>,
-  ): Promise<T> {
-    const stdout = await run(args, runOptions);
-    return parseCliJsonOutput({
-      commandName: "glab",
-      args,
-      cwd: runOptions.cwd,
-      stdout,
-      schema,
-      createCommandError: (params) => new GlabCommandError(params),
-    });
-  }
-
   async function viewMergeRequest(cwd: string, ref: string): Promise<GitLabMergeRequest> {
     assertSafeGlabPositional(ref);
-    return runJson(["mr", "view", ref, "-F", "json"], { cwd }, GitLabMergeRequestSchema);
+    return runGlabJson(run, ["mr", "view", ref, "-F", "json"], { cwd }, GitLabMergeRequestSchema);
   }
 
   async function listMergeRequestsBySourceBranch(
     cwd: string,
     sourceBranch: string,
   ): Promise<GitLabMergeRequest[]> {
-    return runJson(
+    return runGlabJson(
+      run,
       [
         "mr",
         "list",
@@ -1005,7 +1073,8 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     iid: number,
   ): Promise<boolean> {
     try {
-      const probe = await runJson(
+      const probe = await runGlabJson(
+        run,
         [
           "api",
           `projects/${encodeURIComponent(projectPath)}/merge_requests/${iid}/discussions?per_page=1&page=${TIMELINE_PAGE_SIZE + 1}`,
@@ -1033,7 +1102,8 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
       return null;
     }
     try {
-      return await runJson(
+      return await runGlabJson(
+        run,
         ["api", `projects/${encodeURIComponent(projectPath)}/merge_requests/${mr.iid}/approvals`],
         { cwd },
         GitLabApprovalsSchema,
@@ -1063,7 +1133,8 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
       return { checks: [], pipelineStatus: null };
     }
     try {
-      const pipeline = await runJson(
+      const pipeline = await runGlabJson(
+        run,
         ["ci", "get", "--merge-request", String(mr.iid), "--with-job-details", "-F", "json"],
         { cwd },
         GitLabPipelineDetailsSchema,
@@ -1082,42 +1153,11 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     }
   }
 
-  async function runList<T extends { iid: number }>({
-    kind,
-    input,
-    schema,
-  }: {
-    kind: "mr" | "issue";
-    input: ListPullRequestsOptions | ListIssuesOptions;
-    schema: z.ZodType<T[]>;
-  }): Promise<T[]> {
-    const textSearch = runJson(buildGitLabListArgs({ kind, input }), { cwd: input.cwd }, schema);
-    const numberQuery = gitLabNumberQuery(input.query);
-    if (!numberQuery) return textSearch;
-
-    // GitLab text search omits IIDs, so supplement it with an open-item lookup.
-    const resource = kind === "mr" ? "merge_requests" : "issues";
-    const [numberMatches, textMatches] = await Promise.all([
-      runJson(
-        ["api", `projects/:id/${resource}?state=opened&iids[]=${numberQuery}`],
-        { cwd: input.cwd },
-        schema,
-      ),
-      textSearch,
-    ]);
-    const seen = new Set<number>();
-    const items = [...numberMatches, ...textMatches].filter((item) => {
-      if (seen.has(item.iid)) return false;
-      seen.add(item.iid);
-      return true;
-    });
-    return typeof input.limit === "number" ? items.slice(0, input.limit) : items;
-  }
-
   async function runMergeRequestList(
     input: ListPullRequestsOptions,
   ): Promise<PullRequestSummary[]> {
-    const mergeRequests = await runList({
+    const mergeRequests = await runGlabList<GitLabMergeRequest>({
+      run,
       kind: "mr",
       input,
       schema: z.array(GitLabMergeRequestSchema),
@@ -1126,7 +1166,12 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
   }
 
   async function runIssueList(input: ListIssuesOptions): Promise<IssueSummary[]> {
-    const issues = await runList({ kind: "issue", input, schema: z.array(GitLabIssueSchema) });
+    const issues = await runGlabList<GitLabIssue>({
+      run,
+      kind: "issue",
+      input,
+      schema: z.array(GitLabIssueSchema),
+    });
     return issues.map(toIssueSummary);
   }
 
@@ -1280,7 +1325,8 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
             },
           };
         }
-        const discussions = await runJson(
+        const discussions = await runGlabJson(
+          run,
           [
             "api",
             `projects/${encodeURIComponent(projectPath)}/merge_requests/${mr.iid}/discussions?per_page=${TIMELINE_PAGE_SIZE}`,
@@ -1324,7 +1370,8 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
         input.changeRequestNumber !== undefined
           ? ["--merge-request", String(input.changeRequestNumber)]
           : ["--pipeline-id", String(input.checkRunId)];
-      const pipeline = await runJson(
+      const pipeline = await runGlabJson(
+        run,
         ["ci", "get", ...selector, "--with-job-details", "-F", "json"],
         { cwd: input.cwd },
         GitLabPipelineDetailsSchema,

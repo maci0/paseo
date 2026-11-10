@@ -3,7 +3,7 @@ import os from "node:os";
 import type { ModelInfo, Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { raceProviderRefreshAbort } from "../../provider-refresh-deadline.js";
 import type { ProviderRuntimeSettings } from "../../provider-launch-config.js";
-import { terminateWithTreeKill } from "../../../../utils/tree-kill.js";
+import { terminateChildWithTreeKill } from "../../../../utils/tree-kill.js";
 import { claudeQuery, type ClaudeQueryInput, type ClaudeQueryContext } from "./query.js";
 
 interface ClaudeModelDiscoveryOptions {
@@ -82,7 +82,7 @@ export async function discoverClaudeModels(
       query?.close();
     } finally {
       if (child) {
-        await terminateWithTreeKill(child, { gracefulTimeoutMs: 200, forceTimeoutMs: 200 });
+        await terminateChildWithTreeKill(child, { gracefulTimeoutMs: 200, forceTimeoutMs: 200 });
       }
     }
   }

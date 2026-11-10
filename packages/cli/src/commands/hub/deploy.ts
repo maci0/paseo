@@ -225,21 +225,35 @@ export async function runHubDeployBundle(
     apiKey: credential,
     ...deployInput,
   };
+  const hub = environment.hub ?? new HubHttpClient();
   if (options.dryRun === true) {
-    const validated = await (environment.hub ?? new HubHttpClient()).validateConfiguration(request);
-    return {
+    const validated = await hub.validateConfiguration(request);
+    const dryRun: SingleResult<HubDryRunResult> = {
       type: "single",
-      data: { ...validated, workflows: deployInput.workflowCount, origin },
+      data: {
+        projectSlug: validated.projectSlug,
+        valid: validated.valid,
+        origin,
+        workflows: deployInput.workflowCount,
+      },
       schema: validationSchema,
     };
+    return dryRun;
   }
-  const deployed = await (environment.hub ?? new HubHttpClient()).installConfiguration(request);
-
-  return {
+  const deployed = await hub.installConfiguration(request);
+  const installed: SingleResult<HubDeployResult> = {
     type: "single",
-    data: { ...deployed, workflows: deployInput.workflowCount, origin },
+    data: {
+      projectSlug: deployed.projectSlug,
+      version: deployed.version,
+      versionId: deployed.versionId,
+      active: deployed.active,
+      origin,
+      workflows: deployInput.workflowCount,
+    },
     schema: resultSchema,
   };
+  return installed;
 }
 
 export function addHubDeployCommand(
@@ -257,18 +271,15 @@ export function addHubDeployCommand(
         .option("--dry-run", "Validate without installing or activating"),
     ),
   ).action(
-    withOutput<
-      HubDeployResult | HubDryRunResult | HubTriggerDeployResult | HubTriggerDryRunResult,
-      unknown[]
-    >(async (...args) => {
-      const options = args.at(-2) as HubDeployOptions;
-      return runHubDeploy(options, {
+    withOutput(async (options: HubDeployOptions = {} as HubDeployOptions) => {
+      const environment = {
         cwd: dependencies.cwd(),
         env: dependencies.env,
         credentials: dependencies.credentials,
         hub: dependencies.hub,
         reporter: dependencies.reporter,
-      });
+      };
+      return (await runHubDeploy(options, environment)) as SingleResult<HubDeployResult>;
     }),
   );
 }

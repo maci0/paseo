@@ -33,7 +33,9 @@ function isProviderRegistered(
     return true;
   }
   if (validProviders instanceof Set) {
-    return validProviders.has(provider);
+    // Typed local: scriptc cannot lower has() on the Set<any> that instanceof narrows to.
+    const providers: Set<AgentProvider> = validProviders;
+    return providers.has(provider);
   }
   return new Set(validProviders).has(provider);
 }

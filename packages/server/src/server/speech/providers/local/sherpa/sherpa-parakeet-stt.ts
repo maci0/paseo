@@ -1,9 +1,10 @@
 import { EventEmitter } from "node:events";
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "node:crypto";
 import type pino from "pino";
 
 import type {
   SpeechToTextProvider,
+  StreamingTranscriptionEvent,
   StreamingTranscriptionSession,
   TranscriptionResult,
 } from "../../../speech-provider.js";
@@ -14,7 +15,10 @@ import {
   pcm16lePeakAbs,
   pcm16leToFloat32,
 } from "../../../audio.js";
-import { SherpaOfflineRecognizerEngine } from "./sherpa-offline-recognizer.js";
+import {
+  recognizerResultText,
+  SherpaOfflineRecognizerEngine,
+} from "./sherpa-offline-recognizer.js";
 
 export interface SherpaParakeetSttConfig {
   engine: SherpaOfflineRecognizerEngine;
@@ -42,7 +46,7 @@ export class SherpaOnnxParakeetSTT implements SpeechToTextProvider {
     const logger = params.logger.child({ provider: "local", component: "parakeet-stt-session" });
     const requiredSampleRate = this.engine.sampleRate;
     let connected = false;
-    let segmentId = uuidv4();
+    let segmentId = randomUUID();
     let previousSegmentId: string | null = null;
     let pcm16: Buffer = Buffer.alloc(0);
 
@@ -68,7 +72,7 @@ export class SherpaOnnxParakeetSTT implements SpeechToTextProvider {
         const prev = previousSegmentId;
         const committedPcm16 = pcm16;
         previousSegmentId = committedId;
-        segmentId = uuidv4();
+        segmentId = randomUUID();
         pcm16 = Buffer.alloc(0);
         emitter.emit("committed", { segmentId: committedId, previousSegmentId: prev });
 
@@ -78,7 +82,7 @@ export class SherpaOnnxParakeetSTT implements SpeechToTextProvider {
               committedPcm16,
               `audio/pcm;rate=${requiredSampleRate}`,
             );
-            emitter.emit("transcript", {
+            const event: StreamingTranscriptionEvent = {
               segmentId: committedId,
               transcript: rt.text,
               isFinal: true,
@@ -86,7 +90,8 @@ export class SherpaOnnxParakeetSTT implements SpeechToTextProvider {
               logprobs: rt.logprobs,
               avgLogprob: rt.avgLogprob,
               isLowConfidence: rt.isLowConfidence,
-            });
+            };
+            emitter.emit("transcript", event);
           } catch (err) {
             emitter.emit("error", err);
           } finally {
@@ -96,7 +101,7 @@ export class SherpaOnnxParakeetSTT implements SpeechToTextProvider {
       },
       clear() {
         pcm16 = Buffer.alloc(0);
-        segmentId = uuidv4();
+        segmentId = randomUUID();
       },
       close() {
         connected = false;
@@ -151,11 +156,7 @@ export class SherpaOnnxParakeetSTT implements SpeechToTextProvider {
       this.engine.acceptWaveform(stream, inputRate, floatSamples);
       this.engine.recognizer.decode(stream);
       const result = this.engine.recognizer.getResult(stream);
-      const text = String(
-        (typeof result === "object" && result && "text" in result ? result.text : undefined) ??
-          result ??
-          "",
-      ).trim();
+      const text = recognizerResultText(result).trim();
       const duration = Date.now() - start;
       this.logger.debug({ duration, textLength: text.length }, "Parakeet transcription complete");
       return { text, duration, ...(text.length === 0 ? { isLowConfidence: true } : {}) };

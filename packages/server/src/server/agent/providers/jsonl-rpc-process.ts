@@ -2,7 +2,7 @@ import { type ChildProcess, type ChildProcessWithoutNullStreams } from "node:chi
 import type { Logger } from "pino";
 
 import { spawnProcess } from "../../../utils/spawn.js";
-import { terminateWithTreeKill } from "../../../utils/tree-kill.js";
+import { terminateChildWithTreeKill } from "../../../utils/tree-kill.js";
 import { JsonlFrameDecoder, ProviderStreamLimitError } from "./jsonl-frame-decoder.js";
 export { supportsJsonlRpcProtocolV2 } from "./jsonl-frame-decoder.js";
 
@@ -106,10 +106,10 @@ export class JsonlRpcProcess {
       },
     });
     this.child = (options.spawn ?? spawnJsonlRpcProcess)(options.launch);
-    this.child.stdout.on("data", (chunk) => {
+    this.child.stdout.on("data", (chunk: Buffer | string) => {
       this.handleStdoutChunk(chunk);
     });
-    this.child.stderr.on("data", (chunk) => {
+    this.child.stderr.on("data", (chunk: Buffer | string) => {
       this.stderrBuffer += chunk.toString();
       if (this.stderrBuffer.length > STDERR_BUFFER_LIMIT) {
         this.stderrBuffer = this.stderrBuffer.slice(-STDERR_BUFFER_LIMIT);
@@ -223,7 +223,8 @@ export class JsonlRpcProcess {
     if (this.disposed) {
       return;
     }
-    if (this.child.stdin.destroyed || !this.child.stdin.writable) {
+    // Node's Writable.writable is false once the stream is destroyed; scriptc cannot read `destroyed`.
+    if (!this.child.stdin.writable) {
       this.handleStdinError(new Error(`${this.diagnosticName} stdin is not writable`));
       return;
     }
@@ -247,7 +248,7 @@ export class JsonlRpcProcess {
     } catch {
       // Ignore cleanup races.
     }
-    const result = await terminateWithTreeKill(this.child, {
+    const result = await terminateChildWithTreeKill(this.child, {
       gracefulTimeoutMs: GRACEFUL_SHUTDOWN_TIMEOUT_MS,
       forceTimeoutMs: FORCE_SHUTDOWN_TIMEOUT_MS,
       onForceSignal: () => {

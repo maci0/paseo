@@ -16,7 +16,6 @@ import { TTLCache } from "@isaacs/ttlcache";
 import type { CheckoutCommit, CheckoutCommitFile } from "@getpaseo/protocol/messages";
 import { parseGitHubRemoteIdentity, parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import { maxSecuredPlaintextByteLength } from "@getpaseo/relay";
-import type { Logger } from "pino";
 import type { ParsedDiffFile } from "../server/utils/diff-highlighter.js";
 import {
   highlightDiffWithFileContent,
@@ -39,7 +38,11 @@ import {
   ForgeCommandError,
 } from "../services/forge-cli-command.js";
 import { parseGitRevParsePath, resolveGitRevParsePath } from "./git-rev-parse-path.js";
-import { runGitCommand, type RunGitCommand } from "./run-git-command.js";
+import {
+  runGitCommand,
+  type GitCommandTraceLogger,
+  type RunGitCommand,
+} from "./run-git-command.js";
 import { readGitFileContents } from "./git-file-contents.js";
 import { unquoteGitPath } from "./git-quoted-path.js";
 import { isPaseoOwnedWorktreeCwd, resolvePaseoWorktreesBaseRoot } from "./worktree.js";
@@ -916,9 +919,13 @@ export type CheckoutStatusGit = CheckoutStatusGitNonPaseo | CheckoutStatusGitPas
 
 export type CheckoutStatusResult = CheckoutStatus | CheckoutStatusGit;
 
-export type CheckoutDiffResult =
-  | { diff: string; structured?: ParsedDiffFile[]; diffTooLarge?: false }
-  | { diff: ""; structured: []; diffTooLarge: true };
+// One record, not a union on diffTooLarge: scriptc cannot pick a union arm by a boolean member.
+// A too-large diff is { diff: "", structured: [], diffTooLarge: true }.
+export interface CheckoutDiffResult {
+  diff: string;
+  structured?: ParsedDiffFile[];
+  diffTooLarge?: boolean;
+}
 
 export interface CheckoutDiffCompare {
   mode: "uncommitted" | "base" | "all";
@@ -938,10 +945,16 @@ export interface MergeFromBaseOptions {
   requireCleanTarget?: boolean;
 }
 
+// Hand-written instead of Pick<Logger, ...>: scriptc cannot call pino's generic log methods
+// through a Pick of its interface.
+export interface CheckoutLogger extends GitCommandTraceLogger {
+  warn(fields: Record<string, unknown>, message: string): void;
+}
+
 export interface CheckoutContext {
   paseoHome?: string;
   worktreesRoot?: string;
-  logger?: Pick<Logger, "trace" | "warn">;
+  logger?: CheckoutLogger;
   facts?: CheckoutSnapshotFacts | null;
   runGitCommand?: RunGitCommand;
 }
@@ -2697,7 +2710,9 @@ function getCommitRenames(cwd: string, sha: string): Promise<ReadonlyMap<string,
   if (cached) {
     return cached;
   }
-  const lookup = readCommitRenames(cwd, sha).catch((error: unknown) => {
+  // Assigned after declaration: scriptc cannot reference a const from its own initializer.
+  let lookup: Promise<ReadonlyMap<string, string>> | null = null;
+  lookup = readCommitRenames(cwd, sha).catch((error: unknown) => {
     if (commitRenamesCache.get(key) === lookup) {
       commitRenamesCache.delete(key);
     }

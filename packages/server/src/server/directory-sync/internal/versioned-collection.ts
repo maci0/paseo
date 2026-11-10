@@ -16,9 +16,19 @@ export interface CollectionRead<T> {
   removals: VersionedRemoval[];
 }
 
-export type PublishedChange<T> =
-  | { kind: "upsert"; seq: number; value: T }
-  | { kind: "remove"; seq: number; id: string };
+export interface PublishedUpsert<T> {
+  kind: "upsert";
+  seq: number;
+  value: T;
+}
+
+export interface PublishedRemove {
+  kind: "remove";
+  seq: number;
+  id: string;
+}
+
+export type PublishedChange<T> = PublishedUpsert<T> | PublishedRemove;
 
 interface StoredValue<T> extends VersionedValue<T> {
   fingerprint: string;
@@ -54,7 +64,7 @@ export class VersionedCollection<T> {
     return this.valuesById.get(id)?.seq ?? this.tombstonesById.get(id) ?? null;
   }
 
-  replace(value: T): Extract<PublishedChange<T>, { kind: "upsert" }> | null {
+  replace(value: T): PublishedUpsert<T> | null {
     const id = this.getId(value);
     const fingerprint = this.fingerprint(value);
     const previous = this.valuesById.get(id);
@@ -66,7 +76,7 @@ export class VersionedCollection<T> {
     return { kind: "upsert", seq, value };
   }
 
-  remove(id: string): Extract<PublishedChange<T>, { kind: "remove" }> | null {
+  remove(id: string): PublishedRemove | null {
     if (!this.valuesById.has(id) && this.tombstonesById.has(id)) return null;
     if (!this.valuesById.delete(id) && !this.tombstonesById.has(id)) return null;
 
@@ -77,7 +87,7 @@ export class VersionedCollection<T> {
     return { kind: "remove", seq, id };
   }
 
-  replaceAll(values: Iterable<T>): void {
+  replaceAll(values: readonly T[]): void {
     const retainedIds = new Set<string>();
     for (const value of values) {
       const id = this.getId(value);

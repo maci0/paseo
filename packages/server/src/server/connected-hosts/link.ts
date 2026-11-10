@@ -1,5 +1,4 @@
 import type { SessionDelivery } from "../session/owned-subscriptions/index.js";
-import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import {
   MAX_HOST_CHANNEL_FRAME_BYTES,
@@ -12,17 +11,49 @@ import type {
   SessionOutboundMessage,
 } from "@getpaseo/protocol/messages";
 
-/** A logical socket has no network resources or authority of its own. */
-export class VirtualHostSocket extends EventEmitter {
+type VirtualHostSocketEvent = "message" | "close" | "error";
+type VirtualHostSocketListener = (...args: unknown[]) => void;
+
+interface VirtualHostSocketListenerEntry {
+  event: VirtualHostSocketEvent;
+  listener: VirtualHostSocketListener;
+  once: boolean;
+}
+
+/**
+ * A logical socket has no network resources or authority of its own. It keeps its own listener
+ * list instead of extending EventEmitter, because scriptc allows one argument tuple per event
+ * name across the whole program and other emitters use other tuples for "message" and "close".
+ * Delivery matches EventEmitter: registration order over a copy of the list, and a once
+ * listener is removed just before it runs.
+ */
+export class VirtualHostSocket {
   readonly maxFrameBytes = MAX_HOST_CHANNEL_FRAME_BYTES;
   readyState = 1;
+  private listeners: VirtualHostSocketListenerEntry[] = [];
   constructor(
     private readonly output: (data: string | Uint8Array) => Promise<void>,
     private readonly ended: (code: number, reason: string) => void,
     private readonly buffered: () => number,
     private readonly transformHello: (data: string) => string,
-  ) {
-    super();
+  ) {}
+  on(event: VirtualHostSocketEvent, listener: VirtualHostSocketListener): this {
+    this.listeners.push({ event, listener, once: false });
+    return this;
+  }
+  once(event: VirtualHostSocketEvent, listener: VirtualHostSocketListener): this {
+    this.listeners.push({ event, listener, once: true });
+    return this;
+  }
+  private deliver(
+    event: VirtualHostSocketEvent,
+    call: (listener: VirtualHostSocketListener) => void,
+  ): void {
+    for (const entry of [...this.listeners]) {
+      if (entry.event !== event) continue;
+      if (entry.once) this.listeners = this.listeners.filter((other) => other !== entry);
+      call(entry.listener);
+    }
   }
   get bufferedAmount(): number {
     return this.buffered();
@@ -43,7 +74,8 @@ export class VirtualHostSocket extends EventEmitter {
       }
       this.helloPending = false;
     }
-    this.emit("message", typeof data === "string" ? data : Buffer.from(data));
+    const message = typeof data === "string" ? data : Buffer.from(data);
+    this.deliver("message", (listener) => listener(message));
   }
   async send(data: string | Uint8Array | ArrayBuffer): Promise<void> {
     if (this.readyState !== 1) throw new Error("Host channel closed");
@@ -55,7 +87,7 @@ export class VirtualHostSocket extends EventEmitter {
     if (this.readyState !== 1) return;
     this.readyState = 3;
     this.ended(code, reason);
-    this.emit("close", 1000, "Host channel closed");
+    this.deliver("close", (listener) => listener(1000, "Host channel closed"));
   }
 }
 
