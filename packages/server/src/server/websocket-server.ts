@@ -1241,15 +1241,20 @@ export class VoiceAssistantWebSocketServer {
     }
   }
 
+  // sessionMessage is the session message as the session sent it. Delivery recognises the
+  // messages it authorised by identity, and in a scriptc binary a message read back out of the
+  // WSOutboundMessage wrapper can be a copy.
   private prepareJsonDelivery(
     sockets: readonly WebSocketLike[],
     message: WSOutboundMessage,
     reportRejection: boolean,
+    sessionMessage?: SessionOutboundMessage,
   ): { sockets: WebSocketLike[]; payload: string; bytes: number } | null {
     const writableSockets = [...sockets].filter((ws) => {
       if (
         message.type === "session" &&
-        this.sessions.get(ws)?.session.delivery.permits(ws, message.message) !== true
+        this.sessions.get(ws)?.session.delivery.permits(ws, sessionMessage ?? message.message) !==
+          true
       ) {
         this.incrementRuntimeCounter("applicationJsonRejected");
         // Legacy broadcasts intentionally exclude modern sockets. Targeted failures are bugs.
@@ -1345,8 +1350,9 @@ export class VoiceAssistantWebSocketServer {
   private async sendMessageToClientAndWait(
     ws: WebSocketLike,
     message: WSOutboundMessage,
+    sessionMessage?: SessionOutboundMessage,
   ): Promise<void> {
-    const prepared = this.prepareJsonDelivery([ws], message, true);
+    const prepared = this.prepareJsonDelivery([ws], message, true, sessionMessage);
     if (!prepared) throw new Error("Source message delivery unavailable");
     try {
       await this.sendSocketFrame(ws, prepared.payload, prepared.bytes, true);
@@ -1562,7 +1568,11 @@ export class VoiceAssistantWebSocketServer {
         if (!connection || !connection.sockets.has(source as WebSocketLike)) {
           return;
         }
-        await this.sendMessageToClientAndWait(source as WebSocketLike, wrapSessionMessage(msg));
+        await this.sendMessageToClientAndWait(
+          source as WebSocketLike,
+          wrapSessionMessage(msg),
+          msg,
+        );
       },
       onBinaryMessage: (frame) => {
         if (!connection) {

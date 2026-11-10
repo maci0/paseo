@@ -1,5 +1,6 @@
 // POSIX-only: git worktree reuse fixtures
 /* eslint-disable max-nested-callbacks */
+import { pluginHooksFrom } from "./test-utils/plugin-hooks.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdirSync,
@@ -513,12 +514,12 @@ describe.skipIf(isPlatform("win32"))("worktree-core POSIX-only", () => {
         { cwd: repoDir, githubPrNumber: 123, refName: "feature/review-pr", paseoHome },
         {
           ...deps,
-          lifecycle: {
+          lifecycle: pluginHooksFrom({
             before: async (name, request) => {
               requests.push(request);
               return validateBeforeResult(name, validateBeforeRequest(name, request), request);
             },
-          },
+          }),
         },
       );
       expect(requests).toEqual([

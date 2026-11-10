@@ -1,5 +1,11 @@
 import type { PluginAgentToolsRuntime } from "./agent-tools.js";
-import type { PluginLifecycle } from "./lifecycle/index.js";
+import type { PluginHookEvents, PluginHookPayload } from "@getpaseo/plugin/server";
+import type {
+  PluginBeforeResults,
+  PluginLifecycle,
+  PluginLifecycleHooks,
+  PluginWireBeforeRequests,
+} from "./lifecycle/index.js";
 import path from "node:path";
 import { stat, rm } from "node:fs/promises";
 import type pino from "pino";
@@ -118,8 +124,11 @@ function buildPluginListItem(input: {
   };
 }
 
-export class PluginService {
+export class PluginService implements PluginLifecycleHooks {
   private readonly runtime: PluginRuntimePort;
+  // The runtime this service created, typed as its class, or null when one is injected (tests).
+  // A scriptc binary cannot call the generic hooks (emit, before) through PluginRuntimePort.
+  private readonly ownRuntime: PluginRuntime | null;
   private readonly managedSources: ManagedPluginSources | null;
   private readonly builtinPluginIds: ReadonlySet<string>;
   private readonly builtinPlugins: BuiltinPluginLoader;
@@ -153,14 +162,19 @@ export class PluginService {
       this.logger,
       dependencies.usageAgents,
     );
-    this.runtime =
-      dependencies.runtime ??
-      new PluginRuntime(logger, daemonVersion, {
+    if (dependencies.runtime) {
+      this.runtime = dependencies.runtime;
+      this.ownRuntime = null;
+    } else {
+      const runtime = new PluginRuntime(logger, daemonVersion, {
         settingsDirectory: dependencies.settingsDirectory,
         onSettingsChanged: (pluginId, settingsId) => {
           for (const listener of this.settingsListeners) listener(pluginId, settingsId);
         },
       });
+      this.runtime = runtime;
+      this.ownRuntime = runtime;
+    }
     this.managedSources = dependencies.managedSources ?? null;
     this.builtinPlugins = dependencies.builtinPlugins ?? new BuiltinPluginLoader(undefined, []);
     this.builtinPluginIds = this.builtinPlugins.ids;
@@ -172,9 +186,13 @@ export class PluginService {
     });
   }
 
-  readonly emit: PluginLifecycle["emit"] = (name, event) => {
-    this.runtime.emit?.(name, event);
-  };
+  // emit, wait and before are methods, not fields holding functions: a scriptc binary cannot
+  // read a generic function stored on a class instance through an interface (Session's
+  // SessionPluginRuntime, the worktree and agent lifecycle dependencies).
+  emit<Name extends keyof PluginHookEvents>(name: Name, event: PluginHookEvents[Name]): void {
+    if (this.ownRuntime) this.ownRuntime.emit(name, event);
+    else this.runtime.emit?.(name, event);
+  }
 
   subscribeSessionOpenChanges(listener: () => void): () => void {
     return this.runtime.subscribeSessionOpenChanges?.(listener) ?? (() => {});
@@ -204,20 +222,84 @@ export class PluginService {
     return this.runtime.callTool(pluginId, pluginInstanceId, agent, name, input, signal);
   };
 
-  readonly wait: PluginLifecycle["wait"] = async (name, payload) => {
-    await this.runtime.wait?.(name, payload);
-  };
+  async wait(
+    name: "worktree.create.after",
+    payload: PluginHookPayload<"worktree.create.after">,
+  ): Promise<void> {
+    if (this.ownRuntime) await this.ownRuntime.wait(name, payload);
+    else await this.runtime.wait?.(name, payload);
+  }
 
   async drainEvents(): Promise<void> {
     await this.runtime.drainEvents?.();
   }
 
-  readonly before: PluginLifecycle["before"] = async (name, request) => {
+  beforeWorkspaceCreate(
+    request: PluginWireBeforeRequests["workspace.create.before"],
+  ): Promise<PluginBeforeResults["workspace.create.before"]> {
+    return this.before("workspace.create.before", request);
+  }
+
+  beforeWorktreeCreate(
+    request: PluginWireBeforeRequests["worktree.create.before"],
+  ): Promise<PluginBeforeResults["worktree.create.before"]> {
+    return this.before("worktree.create.before", request);
+  }
+
+  beforeAgentCreate(
+    request: PluginWireBeforeRequests["agent.create.before"],
+  ): Promise<PluginBeforeResults["agent.create.before"]> {
+    return this.before("agent.create.before", request);
+  }
+
+  beforeAgentOpen(
+    request: PluginWireBeforeRequests["agent.open.before"],
+  ): Promise<PluginBeforeResults["agent.open.before"]> {
+    return this.before("agent.open.before", request);
+  }
+
+  emitWorkspaceCreateAfter(event: PluginHookEvents["workspace.create.after"]): void {
+    this.emit("workspace.create.after", event);
+  }
+
+  emitAgentCreateAfter(event: PluginHookEvents["agent.create.after"]): void {
+    this.emit("agent.create.after", event);
+  }
+
+  emitAgentArchiveAfter(event: PluginHookEvents["agent.archive.after"]): void {
+    this.emit("agent.archive.after", event);
+  }
+
+  emitAgentCloseAfter(event: PluginHookEvents["agent.close.after"]): void {
+    this.emit("agent.close.after", event);
+  }
+
+  emitAgentTurnBefore(event: PluginHookEvents["agent.turn.before"]): void {
+    this.emit("agent.turn.before", event);
+  }
+
+  emitAgentTurnAfter(event: PluginHookEvents["agent.turn.after"]): void {
+    this.emit("agent.turn.after", event);
+  }
+
+  emitAgentPermissionBefore(event: PluginHookEvents["agent.permission.before"]): void {
+    this.emit("agent.permission.before", event);
+  }
+
+  emitAgentPermissionAfter(event: PluginHookEvents["agent.permission.after"]): void {
+    this.emit("agent.permission.after", event);
+  }
+
+  async before<Name extends keyof PluginWireBeforeRequests>(
+    name: Name,
+    request: PluginWireBeforeRequests[Name],
+  ): Promise<PluginBeforeResults[Name]> {
+    if (this.ownRuntime) return this.ownRuntime.before(name, request);
     if (this.runtime.before) {
       return this.runtime.before(name, request);
     }
     return request;
-  };
+  }
 
   subscribeSettings(listener: (pluginId: string, settingsId: string) => void): () => void {
     this.settingsListeners.add(listener);

@@ -1,3 +1,4 @@
+import { providerOverrideFor } from "./agent/provider-launch-config.js";
 import {
   loadPersistedConfig,
   savePersistedConfigAsync,
@@ -328,7 +329,7 @@ export function applyMutableProviderConfigToOverrides(
 
   const nextOverrides: Record<string, ProviderOverride> = { ...baseOverrides };
   for (const [providerId, providerConfig] of Object.entries(mutableProviders ?? {})) {
-    const previousOverride = nextOverrides[providerId];
+    const previousOverride = providerOverrideFor(nextOverrides, providerId);
     const parsedOverride = ProviderOverrideSchema.strip().parse(providerConfig);
     nextOverrides[providerId] = {
       ...previousOverride,

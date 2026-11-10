@@ -1,4 +1,4 @@
-import type { PluginLifecycle } from "../../plugins/lifecycle/index.js";
+import type { PluginLifecycleHooks } from "../../plugins/lifecycle/index.js";
 import { describeHookWorkspace } from "../../plugins/lifecycle/index.js";
 import { basename, resolve } from "node:path";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
@@ -108,7 +108,7 @@ export function createWorkspaceProvisioningService(deps: {
   workspaceGitService: Pick<WorkspaceGitService, "getCheckout" | "getSnapshot">;
   isDirectory: (path: string) => Promise<boolean>;
   logger: Logger;
-  lifecycle?: PluginLifecycle;
+  lifecycle?: PluginLifecycleHooks;
 }): WorkspaceProvisioningService {
   const { serverId, workspaceRegistry, projectRegistry, workspaceGitService, logger } = deps;
 
@@ -312,7 +312,7 @@ export function createWorkspaceProvisioningService(deps: {
     // Narrowed first: scriptc has no optional method calls on an optional field.
     const lifecycle = deps.lifecycle;
     if (!lifecycle) return;
-    lifecycle.emit("workspace.create.after", {
+    lifecycle.emitWorkspaceCreateAfter({
       workspace: describeHookWorkspace(workspace),
     });
   }

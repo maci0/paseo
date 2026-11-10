@@ -408,7 +408,7 @@ export class FileBackedProjectRegistry
     this.allocationQueue = new Promise<void>((resolve) => (release = resolve));
     await previous;
     try {
-      const active = (await this.list())
+      const candidates = (await this.list())
         .filter(
           (project) => !project.archivedAt && areEquivalentPaths(project.rootPath, input.rootPath),
         )
@@ -416,7 +416,10 @@ export class FileBackedProjectRegistry
           (left, right) =>
             Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
             left.projectId.localeCompare(right.projectId),
-        )[0];
+        );
+      // Not [0] of a possibly empty list: in the native daemon the read is checked against the
+      // record type and undefined fails.
+      const active = candidates.length > 0 ? candidates[0] : undefined;
       if (active) {
         if (active.kind === input.kind && active.projectKey === (input.projectKey ?? null))
           return active;

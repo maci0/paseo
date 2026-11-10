@@ -1,4 +1,4 @@
-import type { PluginLifecycle } from "./plugins/lifecycle/index.js";
+import type { PluginLifecycleHooks } from "./plugins/lifecycle/index.js";
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -60,7 +60,7 @@ export interface AttemptFirstAgentBranchAutoNameResult {
 }
 
 export interface CreatePaseoWorktreeDeps extends CreateWorktreeCoreDeps {
-  lifecycle?: Pick<PluginLifecycle, "wait" | "before">;
+  lifecycle?: Pick<PluginLifecycleHooks, "wait" | "beforeWorktreeCreate">;
   workspaceGitService: WorkspaceGitService;
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "createWorkspaceForWorktree">;
 }

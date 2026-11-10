@@ -3,7 +3,7 @@ import type { AgentToolResult } from "@getpaseo/plugin/server";
 import type { RuntimeCleanupCandidate } from "./idle-runtime-cleanup/index.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { projectTimelineRows } from "./timeline-projection.js";
-import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
+import type { PluginLifecycleHooks } from "../plugins/lifecycle/index.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
@@ -327,7 +327,7 @@ export interface CreateAgentOptions {
 }
 
 export interface AgentManagerOptions {
-  pluginLifecycle?: PluginLifecycle;
+  pluginLifecycle?: PluginLifecycleHooks;
   /** An internal workspace makes every agent created inside it internal. */
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
@@ -752,7 +752,7 @@ export interface RetiredInternalAgent {
 }
 
 export class AgentManager {
-  private readonly pluginLifecycle: PluginLifecycle | undefined;
+  private readonly pluginLifecycle: PluginLifecycleHooks | undefined;
   private readonly retiredInternalAgents = new Map<
     string,
     RetiredInternalAgent & { expiresAt: number }
@@ -1371,7 +1371,7 @@ export class AgentManager {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
     if (this.pluginLifecycle && !config.internal) {
-      const request = await this.pluginLifecycle.before("agent.create.before", {
+      const request = await this.pluginLifecycle.beforeAgentCreate({
         config,
         env: options.env,
       });
@@ -1416,7 +1416,7 @@ export class AgentManager {
       historyPrimed: true,
     });
     if (!agent.internal && this.pluginLifecycle) {
-      this.pluginLifecycle.emit("agent.create.after", {
+      this.pluginLifecycle.emitAgentCreateAfter({
         agent: describeHookAgent({ ...agent, title: agent.config.title }),
       });
     }
@@ -2132,7 +2132,7 @@ export class AgentManager {
     const archivedRecord = buildArchivedAgentRecord(record, options);
     await this.requireRegistry().upsert(archivedRecord);
     if (!record.archivedAt && !record.internal && this.pluginLifecycle) {
-      this.pluginLifecycle.emit("agent.archive.after", {
+      this.pluginLifecycle.emitAgentArchiveAfter({
         agent: describeHookAgent(archivedRecord),
         archivedAt: archivedRecord.archivedAt,
       });
@@ -4114,7 +4114,7 @@ export class AgentManager {
   private emitClosedAgent(agent: ManagedAgentClosed, options?: { persist?: boolean }): void {
     this.emitState(agent, options);
     if (!agent.internal && this.pluginLifecycle) {
-      this.pluginLifecycle.emit("agent.close.after", {
+      this.pluginLifecycle.emitAgentCloseAfter({
         agent: describeHookAgent({ ...agent, title: agent.config.title }),
       });
     }
@@ -5623,7 +5623,7 @@ export class AgentManager {
         tools: [],
         mcpServers: {},
       };
-      const transformed = await this.pluginLifecycle.before("agent.open.before", request);
+      const transformed = await this.pluginLifecycle.beforeAgentOpen(request);
       env = transformed.env;
       if (request.purpose === "interactive") {
         this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);

@@ -1,3 +1,4 @@
+import { pluginHooksFrom } from "../../test-utils/plugin-hooks.js";
 import os from "node:os";
 import path from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs";
@@ -153,12 +154,12 @@ test("background workspace creation preserves hooks, inheritance and durable vis
     workspaceGitService: gitService(),
     isDirectory,
     logger,
-    lifecycle: {
+    lifecycle: pluginHooksFrom({
       emit: (name) => {
         events.push(name);
       },
       before: async (_name, request) => request,
-    },
+    }),
   });
   const parent = await provisioning.createWorkspaceForDirectory(dir, null, undefined, {
     background: true,

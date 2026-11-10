@@ -1,3 +1,4 @@
+import { pluginHooksFrom } from "../test-utils/plugin-hooks.js";
 import { createIdleRuntimeCleanup } from "./idle-runtime-cleanup/index.js";
 import {
   prepareAgentMessage,
@@ -8070,13 +8071,13 @@ test("workspace ownership does not turn an ordinary agent into a disposable help
     registry: storage,
     logger,
     idFactory: () => agentId,
-    pluginLifecycle: {
+    pluginLifecycle: pluginHooksFrom({
       emit: () => {},
       before: async (name, request) => {
         beforeHookCalls.push(name);
         return request;
       },
-    },
+    }),
   });
 
   await manager.createAgent({ provider: "codex", cwd: workdir, title: "Helper" }, undefined, {
@@ -12379,12 +12380,12 @@ test.each([
       registry: new AgentStorage(join(workdir, "agents"), logger),
       logger,
       timelineStore,
-      pluginLifecycle: {
+      pluginLifecycle: pluginHooksFrom({
         before: async (_name, request) => request,
         emit: (name, event) => {
           events.push({ name, event });
         },
-      },
+      }),
     });
     onTestFinished(async () => {
       await manager.closeAgent(manager.listAgents()[0]!.id);

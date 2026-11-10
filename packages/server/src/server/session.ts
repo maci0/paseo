@@ -1,3 +1,4 @@
+import type { PluginLifecycleHooks } from "./plugins/lifecycle/index.js";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
 import { AgentDirectory } from "./agent/directory.js";
@@ -453,12 +454,9 @@ const nodeSessionFileSystem: SessionFileSystem = {
 // Stub types for features under development (modules not yet available)
 type AgentMcpTransportFactory = () => Promise<unknown>;
 
-// An interface over PluginLifecycle's methods: scriptc cannot call the generic `before` through
-// a property typed as PluginLifecycle["before"].
-export interface SessionPluginRuntime extends Pick<
-  import("./plugins/lifecycle/index.js").PluginLifecycle,
-  "wait" | "before" | "emit"
-> {
+// PluginLifecycleHooks, not PluginLifecycle: a scriptc binary cannot call a generic method
+// through an interface.
+export interface SessionPluginRuntime extends PluginLifecycleHooks {
   listPlugins(): Promise<import("@getpaseo/protocol/messages").PluginListItem[]>;
   getLogs(pluginId: string): import("@getpaseo/protocol/messages").PluginLogEntry[];
   installDirectory(input: {
@@ -6903,7 +6901,7 @@ export class Session {
     // and must not rerun hooks or compare their potentially changing output.
     if (this.pluginRuntime) {
       const { type, requestId, ...input } = request;
-      const transformed = await this.pluginRuntime.before("workspace.create.before", input);
+      const transformed = await this.pluginRuntime.beforeWorkspaceCreate(input);
       creationRequest = { ...transformed, type, requestId };
     }
     return creationRequest.source.kind === "directory"

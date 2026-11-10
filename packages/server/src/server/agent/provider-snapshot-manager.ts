@@ -31,6 +31,7 @@ import type {
   AgentProviderRuntimeSettingsMap,
   ProviderOverride,
 } from "./provider-launch-config.js";
+import { providerOverrideFor } from "./provider-launch-config.js";
 import {
   buildProviderRegistry,
   shutdownAgentClients,
@@ -418,7 +419,7 @@ export class ProviderSnapshotManager {
     const retiredProviders = Object.keys(previousPlugins).filter(
       (provider) =>
         previousPlugins[provider] !== plugins[provider] &&
-        !this.providerOverrides?.[provider]?.extends,
+        !providerOverrideFor(this.providerOverrides, provider)?.extends,
     );
     const definitions = this.buildRegistry(this.runtimeSettings, this.providerOverrides);
     const changed = new Set<AgentProvider>();
@@ -427,7 +428,7 @@ export class ProviderSnapshotManager {
       const after = definitions[provider];
       const registrationChanged =
         previousPlugins[provider] !== plugins[provider] &&
-        !this.providerOverrides?.[provider]?.extends;
+        !providerOverrideFor(this.providerOverrides, provider)?.extends;
       if (
         registrationChanged ||
         !before ||
@@ -847,7 +848,8 @@ export class ProviderSnapshotManager {
       }
       const custom =
         this.pluginProviders.has(provider) ||
-        (!BUILTIN_PROVIDER_IDS.includes(provider) && !!overrides?.[provider]?.extends);
+        (!BUILTIN_PROVIDER_IDS.includes(provider) &&
+          !!providerOverrideFor(overrides, provider)?.extends);
       providerStates.set(provider, {
         discoveryLimit:
           previous?.discoveryLimit ?? new ConcurrencyLimit(4, { rejectOnClear: true }),

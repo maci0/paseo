@@ -138,6 +138,38 @@ export interface PluginLifecycle {
   ): Promise<PluginBeforeResults[Name]>;
 }
 
+/**
+ * The hooks Paseo's own services call, one method per hook, none generic. A scriptc binary
+ * cannot call a generic method through an interface, so services take this interface rather
+ * than PluginLifecycle; PluginService implements it with its generic before and emit.
+ */
+export interface PluginLifecycleHooks {
+  wait(
+    name: "worktree.create.after",
+    payload: PluginHookPayload<"worktree.create.after">,
+  ): Promise<void>;
+  beforeWorkspaceCreate(
+    request: PluginWireBeforeRequests["workspace.create.before"],
+  ): Promise<PluginBeforeResults["workspace.create.before"]>;
+  beforeWorktreeCreate(
+    request: PluginWireBeforeRequests["worktree.create.before"],
+  ): Promise<PluginBeforeResults["worktree.create.before"]>;
+  beforeAgentCreate(
+    request: PluginWireBeforeRequests["agent.create.before"],
+  ): Promise<PluginBeforeResults["agent.create.before"]>;
+  beforeAgentOpen(
+    request: PluginWireBeforeRequests["agent.open.before"],
+  ): Promise<PluginBeforeResults["agent.open.before"]>;
+  emitWorkspaceCreateAfter(event: PluginHookEvents["workspace.create.after"]): void;
+  emitAgentCreateAfter(event: PluginHookEvents["agent.create.after"]): void;
+  emitAgentArchiveAfter(event: PluginHookEvents["agent.archive.after"]): void;
+  emitAgentCloseAfter(event: PluginHookEvents["agent.close.after"]): void;
+  emitAgentTurnBefore(event: PluginHookEvents["agent.turn.before"]): void;
+  emitAgentTurnAfter(event: PluginHookEvents["agent.turn.after"]): void;
+  emitAgentPermissionBefore(event: PluginHookEvents["agent.permission.before"]): void;
+  emitAgentPermissionAfter(event: PluginHookEvents["agent.permission.after"]): void;
+}
+
 export function validateBeforeRequest<Name extends keyof PluginWireBeforeRequests>(
   name: Name,
   value: unknown,
@@ -174,37 +206,43 @@ export function describeHookAgent(agent: {
 }
 
 export function publishAgentStream(
-  lifecycle: PluginLifecycle,
+  lifecycle: Pick<
+    PluginLifecycleHooks,
+    | "emitAgentTurnBefore"
+    | "emitAgentTurnAfter"
+    | "emitAgentPermissionBefore"
+    | "emitAgentPermissionAfter"
+  >,
   agent: PluginHookAgent,
   event: AgentStreamEvent,
 ): void {
   if (event.type === "turn_started") {
-    lifecycle.emit("agent.turn.before", { agent, turnId: event.turnId ?? null });
+    lifecycle.emitAgentTurnBefore({ agent, turnId: event.turnId ?? null });
   } else if (event.type === "turn_completed") {
-    lifecycle.emit("agent.turn.after", {
+    lifecycle.emitAgentTurnAfter({
       agent,
       turnId: event.turnId ?? null,
       timeline: [],
       outcome: { kind: "completed" },
     });
   } else if (event.type === "turn_failed") {
-    lifecycle.emit("agent.turn.after", {
+    lifecycle.emitAgentTurnAfter({
       agent,
       turnId: event.turnId ?? null,
       timeline: [],
       outcome: { kind: "failed", error: { message: event.error, code: event.code } },
     });
   } else if (event.type === "turn_canceled") {
-    lifecycle.emit("agent.turn.after", {
+    lifecycle.emitAgentTurnAfter({
       agent,
       turnId: event.turnId ?? null,
       timeline: [],
       outcome: { kind: "canceled", reason: event.reason },
     });
   } else if (event.type === "permission_requested") {
-    lifecycle.emit("agent.permission.before", { agent, request: event.request });
+    lifecycle.emitAgentPermissionBefore({ agent, request: event.request });
   } else if (event.type === "permission_resolved") {
-    lifecycle.emit("agent.permission.after", {
+    lifecycle.emitAgentPermissionAfter({
       agent,
       requestId: event.requestId,
       resolution: event.resolution,

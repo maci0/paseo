@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import type { ProviderOptions, ToolPolicy } from "@getpaseo/protocol/agent-types";
 
+import { providerOverrideFor } from "./provider-launch-config.js";
 import type {
   AgentClient,
   AgentCreateConfigUnattendedInput,
@@ -926,7 +927,7 @@ export function buildProviderRegistry(
     if (resolvedProviders.has(provider)) {
       throw new Error(`Plugin provider '${provider}' conflicts with a built-in provider`);
     }
-    const override = providerOverrides[provider];
+    const override = providerOverrideFor(providerOverrides, provider);
     if (definition.requiresConfiguration && !override) continue;
 
     if (override?.extends) {

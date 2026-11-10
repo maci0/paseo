@@ -1,5 +1,5 @@
 import type { PluginWorktreeCreateRequest } from "@getpaseo/plugin/server";
-import type { PluginLifecycle } from "./plugins/lifecycle/index.js";
+import type { PluginLifecycleHooks } from "./plugins/lifecycle/index.js";
 import { createNameId } from "mnemonic-id";
 
 import type { ForgeService } from "../services/forge-service.js";
@@ -34,7 +34,7 @@ export interface CreateWorktreeCoreInput {
 }
 
 export interface CreateWorktreeCoreDeps {
-  lifecycle?: Pick<PluginLifecycle, "before">;
+  lifecycle?: Pick<PluginLifecycleHooks, "beforeWorktreeCreate">;
   github: ForgeService;
   workspaceGitService?: Pick<
     WorkspaceGitService,
@@ -134,9 +134,7 @@ async function createWorktreeCoreWithPriority(
     slug: normalizedSlug,
     path: defaultPath,
   });
-  const transformed = deps.lifecycle
-    ? await deps.lifecycle.before("worktree.create.before", request)
-    : request;
+  const transformed = deps.lifecycle ? await deps.lifecycle.beforeWorktreeCreate(request) : request;
   normalizedSlug = validateWorktreeSlug(transformed.slug);
   intent = creationIntentFromRequest(transformed, intent);
 

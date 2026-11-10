@@ -277,3 +277,15 @@ export async function isProviderCommandAvailable(
     return false;
   }
 }
+
+/**
+ * `overrides?.[provider]`, without reading a key the record does not have. In the native
+ * daemon scriptc holds these z.infer records as checked-dynamic values, and reading a missing
+ * key there checks undefined against the override type and throws.
+ */
+export function providerOverrideFor(
+  overrides: Record<string, ProviderOverride> | undefined,
+  provider: string,
+): ProviderOverride | undefined {
+  return overrides && provider in overrides ? overrides[provider] : undefined;
+}

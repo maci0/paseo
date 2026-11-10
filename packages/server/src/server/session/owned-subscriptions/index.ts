@@ -16,13 +16,22 @@ interface DeliveryOwner {
   source: Source;
   active: boolean;
 }
-interface RequestOwner extends DeliveryOwner {
-  scope: object;
-  request: SessionInboundMessage;
+// The values AsyncLocalStorage holds are class instances, not plain records: in a scriptc
+// binary getStore() returns a copy of a plain record, and delivery compares owners and their
+// sources by identity and reads `active` after it changes.
+class RequestOwner implements DeliveryOwner {
+  active = true;
+  constructor(
+    readonly scope: object,
+    readonly source: Source,
+    readonly request: SessionInboundMessage,
+  ) {}
 }
-interface ProjectionOwner {
-  scope: object;
-  source: object;
+class ProjectionOwner {
+  constructor(
+    readonly scope: object,
+    readonly source: object,
+  ) {}
 }
 interface RetainedOwner extends DeliveryOwner {
   cancellation: AbortController;
@@ -125,7 +134,7 @@ export class SessionDelivery {
 
   forSource<T>(source: object, project: () => T): T {
     if (this.closing) throw new Error("Session delivery is closed");
-    return projectionSource.run({ scope: this.scope, source }, project);
+    return projectionSource.run(new ProjectionOwner(this.scope, source), project);
   }
 
   hasLegacySources(): boolean {
@@ -207,7 +216,7 @@ export class SessionDelivery {
     socket ??= this.defaultSource;
     if (!this.sources.has(socket)) this.attach(socket, false);
     const source = this.sources.get(socket)!;
-    const owner: RequestOwner = { scope: this.scope, source, request, active: true };
+    const owner = new RequestOwner(this.scope, source, request);
     try {
       await requests.run(owner, run);
     } finally {
