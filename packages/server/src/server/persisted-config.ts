@@ -661,7 +661,9 @@ export function editPersistedConfig(
     object[part] ??= {};
     object = object[part] as Record<string, unknown>;
   }
-  const key = parts.at(-1)!;
+  // Indexed, not at(-1): the native CLI compiles this module from its untyped dist JS, where
+  // scriptc has no native type for at()'s result (SC2011).
+  const key = parts[parts.length - 1];
   if (field === "daemon") {
     const previousAuth = config.daemon?.auth;
     const nextAuth =

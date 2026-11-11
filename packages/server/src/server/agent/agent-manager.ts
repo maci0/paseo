@@ -354,9 +354,22 @@ export interface AgentManagerOptions {
   logger: Logger;
 }
 
-export type ActiveTurnSteerDispatchResult =
-  | { status: "inactive" | "steered" }
-  | { status: "replaced"; iterator: AsyncGenerator<AgentStreamEvent> };
+/**
+ * A class, not a record: in a native build, a class method whose result is a union of records
+ * holding an AsyncGenerator is left out of the class's run-time prototype, and in the daemon so
+ * is every method after it, so calls that read methods from the prototype fail with "is not a
+ * function".
+ */
+export class ReplacedActiveTurn {
+  readonly status = "replaced";
+  readonly iterator: AsyncGenerator<AgentStreamEvent>;
+
+  constructor(iterator: AsyncGenerator<AgentStreamEvent>) {
+    this.iterator = iterator;
+  }
+}
+
+export type ActiveTurnSteerDispatchResult = { status: "inactive" | "steered" } | ReplacedActiveTurn;
 
 function stripSteerOptions(options?: AgentSteerOptions): AgentRunOptions | undefined {
   if (!options) return undefined;
@@ -3109,15 +3122,14 @@ export class AgentManager {
 
     await this.beforeSteerUnavailableFallback?.({ agentId, expectedTurnId });
     this.assertSteerAdmissionOwnsTurn(agent, expectedTurnId);
-    return {
-      status: "replaced",
-      iterator: await this.replaceAdmittedForegroundTurn(
+    return new ReplacedActiveTurn(
+      await this.replaceAdmittedForegroundTurn(
         agent,
         expectedTurnId,
         prompt,
         stripSteerOptions(options),
       ),
-    };
+    );
   }
 
   private assertSteerAdmissionOwnsTurn(agent: ActiveManagedAgent, expectedTurnId: string): void {
