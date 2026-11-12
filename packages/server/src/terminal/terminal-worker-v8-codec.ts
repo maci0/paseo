@@ -331,8 +331,15 @@ class Reader {
     return this.position === this.bytes.length;
   }
 
+  // A value-returning path ends in `throw this.codecError(...)`, never `return this.fail(...)`:
+  // the native CLI compiles this module from its dist JS, where `fail` has no `never` type, and
+  // a release build of a return that holds it stops with an internal SC3004 (scriptc#3584).
+  private codecError(message: string): V8CodecError {
+    return new V8CodecError(`Invalid V8 serialized data at byte ${this.position}: ${message}`);
+  }
+
   private fail(message: string): never {
-    throw new V8CodecError(`Invalid V8 serialized data at byte ${this.position}: ${message}`);
+    throw this.codecError(message);
   }
 
   private remaining(): number {
@@ -365,7 +372,7 @@ class Reader {
       }
       scale *= 0x80;
     }
-    return this.fail("varint exceeds 32 bits");
+    throw this.codecError("varint exceeds 32 bits");
   }
 
   /** A length that must fit in the bytes left, checked before anything is allocated for it. */
@@ -445,7 +452,7 @@ class Reader {
       case Tag.utf8String:
         return this.readRaw(this.readLength(1)).toString("utf8");
       default:
-        return this.fail(`unsupported tag ${hexTag(tag)}`);
+        throw this.codecError(`unsupported tag ${hexTag(tag)}`);
     }
   }
 
@@ -573,7 +580,7 @@ class Reader {
     if (typeIndex === HostView.uint32) return new Uint32Array(this.alignedCopy(data, 4));
     if (typeIndex === HostView.float32) return new Float32Array(this.alignedCopy(data, 4));
     if (typeIndex === HostView.float64) return new Float64Array(this.alignedCopy(data, 8));
-    return this.fail(`unsupported host object type ${typeIndex}`);
+    throw this.codecError(`unsupported host object type ${typeIndex}`);
   }
 
   private alignedCopy(data: Buffer, elementBytes: number): ArrayBuffer {
