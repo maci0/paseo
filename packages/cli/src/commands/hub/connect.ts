@@ -68,7 +68,7 @@ export function addHubConnectCommand(parent: Command, dependencies: HubConnectDe
         .option("--permission <permission...>", "Grant daemon permission during connection"),
     ),
   ).action(
-    withOutput(async (origin?: string, options: HubConnectOptions = {} as HubConnectOptions) => {
+    withOutput(async (origin: string | undefined, options: HubConnectOptions) => {
       return runHubConnect(origin, options, dependencies);
     }),
   );

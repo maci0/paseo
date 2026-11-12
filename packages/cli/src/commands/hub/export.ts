@@ -111,7 +111,7 @@ export function addHubExportCommand(parent: Command, dependencies: HubExportDepe
         .option("--force", "Replace trigger files with different contents"),
     ),
   ).action(
-    withOutput(async (directory?: string, options: HubExportOptions = {} as HubExportOptions) => {
+    withOutput(async (directory: string | undefined, options: HubExportOptions) => {
       return runHubExport(directory, options, dependencies);
     }),
   );

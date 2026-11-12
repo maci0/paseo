@@ -80,7 +80,7 @@ export function addHubPermissionsCommand(
     .description("Manage this Hub's daemon permissions");
 
   addJsonAndDaemonHostOptions(permissions.command("list")).action(
-    withOutput(async (options: HubPermissionsOptions = {} as HubPermissionsOptions) => {
+    withOutput(async (options: HubPermissionsOptions) => {
       return runHubPermissionsList(options, dependencies);
     }),
   );
@@ -89,7 +89,7 @@ export function addHubPermissionsCommand(
     addJsonAndDaemonHostOptions(
       permissions.command(operation).argument("<permission>", "Daemon permission"),
     ).action(
-      withOutput(async (permission = "", options: HubPermissionsOptions = {} as HubPermissionsOptions) => {
+      withOutput(async (permission = "", options: HubPermissionsOptions) => {
         return runHubPermissionChange(operation, permission, options, dependencies);
       }),
     );

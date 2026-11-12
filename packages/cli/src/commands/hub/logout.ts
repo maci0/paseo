@@ -97,7 +97,7 @@ export function addHubLogoutCommand(parent: Command, dependencies: HubLogoutDepe
       .option("--disconnect-daemon", "Also disconnect a daemon related to the same Hub")
       .option("--force", "Remove daemon authority without notifying the Hub"),
   ).action(
-    withOutput(async (options: HubLogoutOptions = {} as HubLogoutOptions) => {
+    withOutput(async (options: HubLogoutOptions) => {
       return runHubLogout(options, dependencies);
     }),
   );

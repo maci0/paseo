@@ -271,7 +271,7 @@ export function addHubDeployCommand(
         .option("--dry-run", "Validate without installing or activating"),
     ),
   ).action(
-    withOutput(async (options: HubDeployOptions = {} as HubDeployOptions) => {
+    withOutput(async (options: HubDeployOptions) => {
       const environment = {
         cwd: dependencies.cwd(),
         env: dependencies.env,
